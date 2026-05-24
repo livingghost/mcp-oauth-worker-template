@@ -45,7 +45,7 @@ test("OAuth authorization-code flow issues a bearer token that reaches the prote
         assert.equal(props.consent_id, consentId);
         assert.deepEqual(scopes, ["profile"]);
         return {
-          client: { id: clientId, source: "admin_created", version: 1 },
+          client: { id: clientId, version: 1 },
           consentId,
           permissions: [],
           resource,
@@ -92,7 +92,6 @@ test("OAuth authorization-code flow issues a bearer token that reaches the prote
     props: {
       authz_version: authzVersion,
       client_id: clientId,
-      client_source: "admin_created",
       client_version: 1,
       consent_id: consentId,
       resource,
@@ -185,8 +184,9 @@ async function withQuietProviderWarnings(fn) {
   const originalWarn = console.warn;
   console.warn = (...args) => {
     const message = String(args[0] ?? "");
+    const normalized = message.toLowerCase();
     if (
-      message.startsWith("CIMD (Client ID Metadata Document) is disabled") ||
+      (normalized.includes("metadata") && normalized.includes("disabled")) ||
       message.startsWith("OAuth error response: 401 invalid_token")
     ) {
       return;

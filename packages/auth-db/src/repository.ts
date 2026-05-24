@@ -11,8 +11,6 @@ import {
   sha256Hex,
   timingSafeEqual,
   type AuthContext,
-  type ClientSource,
-  type ClientStatus,
   type OAuthScope,
   type OAuthTokenProps
 } from "@mcp-auth/shared";
@@ -31,11 +29,11 @@ export interface UserRow {
 
 export interface ClientPolicyRow {
   client_id: string;
-  source: ClientSource;
-  status: ClientStatus;
   client_version: number;
   metadata_snapshot_json: string;
   allowed_redirect_uris_json: string;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
 }
 
 export interface ConsentRow {
@@ -48,7 +46,6 @@ export interface ConsentRow {
   scope_hash: string;
   authz_version: number;
   expires_at: string | null;
-  revoked_at: string | null;
 }
 
 export interface AdminUserRow extends UserRow {
@@ -174,6 +171,7 @@ export interface AuthRepository {
   listConsents(limit?: number): Promise<AdminConsentRow[]>;
   listAuditLogs(limit?: number): Promise<AuditLogRow[]>;
   listJobs(limit?: number): Promise<AuthJobRow[]>;
+  deleteUserAccount(userId: string): Promise<boolean>;
   createUser(email: string, permissions: readonly string[], actorUserId: string | null, requestId: string): Promise<UserRow>;
   setUserState(
     userId: string,
@@ -219,15 +217,10 @@ export interface AuthRepository {
   writeAudit(input: AuditInput): Promise<void>;
   createOrUpdateClientPolicy(input: {
     clientId: string;
-    source: ClientSource;
-    status: ClientStatus;
     metadata: unknown;
     redirectUris: readonly string[];
-    actorUserId?: string | null;
     requestId: string;
   }): Promise<void>;
-  createClientCreationRequest(actorUserId: string, requestJson: unknown): Promise<string>;
-  markClientCreationRequest(requestId: string, status: "succeeded" | "failed", clientId?: string | null): Promise<void>;
   getClientPolicy(clientId: string): Promise<ClientPolicyRow | null>;
   listClientPolicies(): Promise<ClientPolicyRow[]>;
   revokeClient(clientId: string, actorUserId: string, requestId: string): Promise<RevokeOutcome>;
@@ -279,7 +272,16 @@ export interface AuthRepository {
   finishJob(jobId: string, leaseId: string, result: "succeeded" | "failed", maxAttempts: number): Promise<void>;
   consumeRateLimits(keys: readonly string[], limit: number, windowSeconds: number): Promise<boolean>;
   optimizeStorage(): Promise<void>;
-  createOtpChallenge(input: CreateOtpInput): Promise<{ id: string; code: string; subjectId: string; ttlSeconds: number }>;
+  createOtpChallenge(input: CreateOtpInput): Promise<CreatedOtpChallenge>;
+  createOrReuseLoginOtpChallenge(input: LoginOtpInput): Promise<LoginOtpChallengeResult>;
+  createOrReuseUserOtpChallenge(input: UserOtpInput): Promise<LoginOtpChallengeResult>;
+  resendOtpChallenge(input: {
+    id: string;
+    purpose: string;
+    resendDelaySeconds: number;
+    secrets: CryptoSecrets;
+    ttlSeconds: number;
+  }): Promise<ResendOtpResult>;
   verifyOtpChallenge(input: VerifyOtpInput): Promise<VerifiedOtp | null>;
   beginPendingAuthorization(input: PendingAuthorizationInput): Promise<PendingAuthorizationClaim>;
   completePendingAuthorization(pendingId: string, leaseId: string): Promise<boolean>;
@@ -304,7 +306,28 @@ export interface CreateOtpInput {
   recoveryConsumeId?: string | null;
   ttlSeconds: number;
   maxAttempts: number;
+  resendDelaySeconds?: number;
   secrets: CryptoSecrets;
+}
+
+export interface LoginOtpInput {
+  userId: string;
+  ttlSeconds: number;
+  maxAttempts: number;
+  resendDelaySeconds: number;
+  secrets: CryptoSecrets;
+}
+
+export interface UserOtpInput extends LoginOtpInput {
+  purpose: string;
+}
+
+export interface CreatedOtpChallenge {
+  id: string;
+  code: string;
+  resendAfter: string;
+  subjectId: string;
+  ttlSeconds: number;
 }
 
 export interface VerifyOtpInput {
@@ -323,6 +346,29 @@ export interface VerifiedOtp {
   recoveryAttemptId: string | null;
   recoveryConsumeId: string | null;
 }
+
+export type ResendOtpResult =
+  | {
+      state: "resent";
+      id: string;
+      code: string;
+      email: string;
+      resendAfter: string;
+      ttlSeconds: number;
+      userId: string | null;
+    }
+  | { state: "too_early"; retryAfterSeconds: number; resendAfter: string }
+  | { state: "invalid" };
+
+export type LoginOtpChallengeResult =
+  | (CreatedOtpChallenge & { state: "created" })
+  | {
+      state: "existing";
+      id: string;
+      resendAfter: string;
+      subjectId: string;
+      ttlSeconds: number;
+    };
 
 export interface PendingAuthorizationInput {
   pendingId: string;
@@ -343,6 +389,88 @@ export type PendingAuthorizationClaim =
 
 export function createAuthRepository(env: AuthTursoEnv): AuthRepository {
   return createAuthRepositoryFromDb(createAuthDb(env));
+}
+
+async function createOrReuseUserOtpChallenge(db: AuthDb, input: UserOtpInput): Promise<LoginOtpChallengeResult> {
+  const now = new Date();
+  const nowIso = now.toISOString();
+  let result: LoginOtpChallengeResult | null = null;
+  await db.withWriteTransaction(async (tx) => {
+    const existing = await tx.get<{
+      id: string;
+      subject_id: string;
+      expires_at: string;
+      resend_after: string;
+    }>(
+      `SELECT otp_challenges.id, otp_challenges.subject_id, otp_challenges.expires_at, otp_challenges.resend_after
+       FROM otp_subjects
+       JOIN otp_challenges ON otp_challenges.subject_id = otp_subjects.subject_id
+       WHERE otp_subjects.user_id = ?
+         AND otp_subjects.purpose = ?
+         AND otp_challenges.purpose = ?
+         AND otp_challenges.redeemed_at IS NULL
+         AND otp_challenges.attempts < otp_challenges.max_attempts
+         AND otp_challenges.expires_at > ?
+         AND otp_subjects.expires_at > ?
+         AND otp_challenges.resend_after IS NOT NULL
+       ORDER BY otp_challenges.created_at DESC
+       LIMIT 1`,
+      [input.userId, input.purpose, input.purpose, nowIso, nowIso]
+    );
+    if (existing) {
+      result = {
+        id: existing.id,
+        resendAfter: existing.resend_after,
+        state: "existing",
+        subjectId: existing.subject_id,
+        ttlSeconds: Math.max(1, Math.ceil((Date.parse(existing.expires_at) - now.getTime()) / 1000))
+      };
+      return;
+    }
+
+    const code = generateOtpCode();
+    const expiresAt = new Date(now.getTime() + input.ttlSeconds * 1000).toISOString();
+    const resendAfter = new Date(now.getTime() + input.resendDelaySeconds * 1000).toISOString();
+    const subjectId = crypto.randomUUID();
+    const challengeId = crypto.randomUUID();
+    const codeHash = await hmacHex(input.secrets.OTP_PEPPER_CURRENT, `${challengeId}:${code}`);
+    await tx.run(
+      `INSERT INTO otp_subjects
+        (subject_id, purpose, user_id, encrypted_email,
+         bootstrap_state_id, recovery_attempt_id, recovery_consume_id, expires_at, created_at)
+       VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?, ?)`,
+      [subjectId, input.purpose, input.userId, expiresAt, nowIso]
+    );
+    await tx.run(
+      `INSERT INTO otp_challenges
+        (id, subject_id, purpose, code_hash, pepper_version, expires_at, attempts,
+         max_attempts, redeemed_at, resend_after, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, ?)`,
+      [
+        challengeId,
+        subjectId,
+        input.purpose,
+        codeHash,
+        input.secrets.OTP_PEPPER_CURRENT_VERSION,
+        expiresAt,
+        input.maxAttempts,
+        resendAfter,
+        nowIso
+      ]
+    );
+    result = {
+      code,
+      id: challengeId,
+      resendAfter,
+      state: "created",
+      subjectId,
+      ttlSeconds: input.ttlSeconds
+    };
+  });
+  if (!result) {
+    throw new Error("User OTP challenge could not be created");
+  }
+  return result;
 }
 
 export function createAuthRepositoryFromDb(db: AuthDb): AuthRepository {
@@ -421,8 +549,7 @@ export function createAuthRepositoryFromDb(db: AuthDb): AuthRepository {
         await tx.run(
           `UPDATE oauth_consents
            SET expires_at = ?
-           WHERE revoked_at IS NULL
-             AND NOT EXISTS (
+           WHERE NOT EXISTS (
                SELECT 1 FROM user_oauth_policies WHERE user_oauth_policies.user_id = oauth_consents.user_id
              )`,
           [expiresAt]
@@ -449,10 +576,7 @@ export function createAuthRepositoryFromDb(db: AuthDb): AuthRepository {
         const user = await tx.get<UserRow>("SELECT * FROM users WHERE id = ? LIMIT 1", [userId]);
         if (user) {
           await tx.run("DELETE FROM user_oauth_policies WHERE user_id = ?", [userId]);
-          await tx.run("UPDATE oauth_consents SET expires_at = ? WHERE user_id = ? AND revoked_at IS NULL", [
-            expiresAt,
-            userId
-          ]);
+          await tx.run("UPDATE oauth_consents SET expires_at = ? WHERE user_id = ?", [expiresAt, userId]);
           outcome = "changed";
         }
         await insertAudit(tx, {
@@ -521,6 +645,30 @@ export function createAuthRepositoryFromDb(db: AuthDb): AuthRepository {
          LIMIT ?`,
         [boundedLimit(limit)]
       );
+    },
+    async deleteUserAccount(userId) {
+      let deleted = false;
+      await db.withWriteTransaction(async (tx) => {
+        const user = await tx.get<UserRow>("SELECT * FROM users WHERE id = ? LIMIT 1", [userId]);
+        if (!user) {
+          return;
+        }
+        await tx.run("DELETE FROM pending_authorization_redeems WHERE user_id = ?", [userId]);
+        await tx.run("DELETE FROM auth_jobs WHERE target_user_id = ?", [userId]);
+        await tx.run("DELETE FROM auth_audit_logs WHERE actor_user_id = ? OR target_user_id = ?", [userId, userId]);
+        await tx.run("UPDATE auth_settings SET updated_by = NULL WHERE updated_by = ?", [userId]);
+        await tx.run("UPDATE bootstrap_state SET consumed_by = NULL WHERE consumed_by = ?", [userId]);
+        await tx.run("DELETE FROM otp_subjects WHERE user_id = ?", [userId]);
+        await tx.run("DELETE FROM recovery_consumes WHERE email = ?", [user.email]);
+        await tx.run("DELETE FROM recovery_attempts WHERE email = ?", [user.email]);
+        await tx.run("DELETE FROM oauth_consents WHERE user_id = ?", [userId]);
+        await tx.run("DELETE FROM login_sessions WHERE user_id = ?", [userId]);
+        await tx.run("DELETE FROM user_oauth_policies WHERE user_id = ?", [userId]);
+        await tx.run("DELETE FROM user_permissions WHERE user_id = ?", [userId]);
+        await tx.run("DELETE FROM users WHERE id = ?", [userId]);
+        deleted = true;
+      });
+      return deleted;
     },
     async createUser(email, permissions, actorUserId, requestId) {
       const normalizedPermissions = assertKnownPermissions(permissions);
@@ -604,10 +752,7 @@ export function createAuthRepositoryFromDb(db: AuthDb): AuthRepository {
           `UPDATE login_sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE user_id = ?`,
           [now, userId]
         );
-        await tx.run(
-          `UPDATE oauth_consents SET revoked_at = COALESCE(revoked_at, ?) WHERE user_id = ?`,
-          [now, userId]
-        );
+          await tx.run("DELETE FROM oauth_consents WHERE user_id = ?", [userId]);
         await tx.run(
             `INSERT OR IGNORE INTO auth_jobs
               (job_id, type, idempotency_key, status, target_user_id, target_client_id, payload_json,
@@ -1032,56 +1177,30 @@ export function createAuthRepositoryFromDb(db: AuthDb): AuthRepository {
       await db.withWriteTransaction(async (tx) => {
         await tx.run(
           `INSERT INTO oauth_client_policies
-            (client_id, source, status, client_version, metadata_snapshot_json, allowed_redirect_uris_json,
-             first_seen_at, approved_at, created_by, updated_by, last_seen_at)
-           VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+            (client_id, client_version, metadata_snapshot_json, allowed_redirect_uris_json,
+             first_seen_at, last_seen_at)
+           VALUES (?, 1, ?, ?, ?, ?)
            ON CONFLICT(client_id) DO UPDATE SET
-             status = excluded.status,
              client_version = oauth_client_policies.client_version + 1,
              metadata_snapshot_json = excluded.metadata_snapshot_json,
              allowed_redirect_uris_json = excluded.allowed_redirect_uris_json,
-             updated_by = excluded.updated_by,
              last_seen_at = excluded.last_seen_at`,
           [
             input.clientId,
-            input.source,
-            input.status,
             JSON.stringify(input.metadata),
             JSON.stringify(input.redirectUris),
             now,
-            input.status === "active" ? now : null,
-            input.actorUserId ?? null,
-            input.actorUserId ?? null,
             now
           ]
         );
         await insertAudit(tx, {
-          actorUserId: input.actorUserId ?? null,
+          actorUserId: null,
           event: "client.policy.upserted",
           result: "success",
           requestId: input.requestId,
-          metadata: { clientId: input.clientId, source: input.source, status: input.status }
+          metadata: { clientId: input.clientId }
         });
       });
-    },
-    async createClientCreationRequest(actorUserId, requestJson) {
-      const now = new Date().toISOString();
-      const requestId = crypto.randomUUID();
-      await db.run(
-        `INSERT INTO client_creation_requests
-          (request_id, actor_user_id, request_json, status, client_id, created_at, updated_at)
-         VALUES (?, ?, ?, 'pending', NULL, ?, ?)`,
-        [requestId, actorUserId, JSON.stringify(requestJson), now, now]
-      );
-      return requestId;
-    },
-    async markClientCreationRequest(requestId, status, clientId) {
-      await db.run(
-        `UPDATE client_creation_requests
-         SET status = ?, client_id = COALESCE(?, client_id), updated_at = ?
-         WHERE request_id = ?`,
-        [status, clientId ?? null, new Date().toISOString(), requestId]
-      );
     },
     getClientPolicy(clientId) {
       return db.get<ClientPolicyRow>("SELECT * FROM oauth_client_policies WHERE client_id = ? LIMIT 1", [clientId]);
@@ -1098,25 +1217,21 @@ export function createAuthRepositoryFromDb(db: AuthDb): AuthRepository {
         ]);
         if (!policy) {
           outcome = "not_found";
-        } else if (policy.status === "revoked") {
-          outcome = "already_revoked";
         } else {
-          const updated = await tx.get<{ client_id: string }>(
-            `UPDATE oauth_client_policies
-             SET status = 'revoked', client_version = client_version + 1, revoked_at = ?, updated_by = ?
-             WHERE client_id = ? AND status <> 'revoked'
-             RETURNING client_id`,
-            [now, actorUserId, clientId]
-          );
-          await tx.run("UPDATE oauth_consents SET revoked_at = COALESCE(revoked_at, ?) WHERE client_id = ?", [
-            now,
-            clientId
-          ]);
-          outcome = updated ? "changed" : "already_revoked";
+          await tx.run("DELETE FROM oauth_consents WHERE client_id = ?", [clientId]);
+          await tx.run("DELETE FROM oauth_client_policies WHERE client_id = ?", [clientId]);
+          await enqueueJobInTx(tx, {
+            idempotencyKey: `delete-provider-client:${clientId}:${requestId}`,
+            payload: { clientId },
+            requestId,
+            targetClientId: clientId,
+            type: "delete_provider_client"
+          });
+          outcome = "changed";
         }
         await insertAudit(tx, {
           actorUserId,
-          event: "client.revoked",
+          event: "client.deleted",
           result: outcome === "changed" ? "success" : outcome === "not_found" ? "failure" : "denied",
           requestId,
           metadata: { clientId, outcome }
@@ -1132,8 +1247,8 @@ export function createAuthRepositoryFromDb(db: AuthDb): AuthRepository {
       await db.run(
         `INSERT INTO oauth_consents
           (id, user_id, client_id, client_version, resource, canonical_scope, scope_hash,
-           authz_version, client_snapshot_json, redirect_uri, granted_at, expires_at, revoked_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+           authz_version, client_snapshot_json, redirect_uri, granted_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
           input.userId,
@@ -1159,7 +1274,7 @@ export function createAuthRepositoryFromDb(db: AuthDb): AuthRepository {
       const scopeHash = await hashScope(input.scopes);
       return db.get<ConsentRow>(
         `SELECT * FROM oauth_consents
-         WHERE user_id = ? AND client_id = ? AND resource = ? AND scope_hash = ? AND revoked_at IS NULL
+         WHERE user_id = ? AND client_id = ? AND resource = ? AND scope_hash = ?
            AND (expires_at IS NULL OR expires_at > ?)
          ORDER BY granted_at DESC
          LIMIT 1`,
@@ -1170,24 +1285,18 @@ export function createAuthRepositoryFromDb(db: AuthDb): AuthRepository {
       return db.get<ConsentRow>("SELECT * FROM oauth_consents WHERE id = ? LIMIT 1", [consentId]);
     },
     async revokeConsent(consentId, actorUserId, requestId) {
-      const now = new Date().toISOString();
       let outcome: RevokeOutcome = "not_found";
       await db.withWriteTransaction(async (tx) => {
         const before = await tx.get<ConsentRow>("SELECT * FROM oauth_consents WHERE id = ? LIMIT 1", [consentId]);
         if (!before) {
           outcome = "not_found";
-        } else if (before.revoked_at) {
-          outcome = "already_revoked";
         } else {
-          const updated = await tx.get<{ id: string }>(
-            "UPDATE oauth_consents SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL RETURNING id",
-            [now, consentId]
-          );
-          outcome = updated ? "changed" : "already_revoked";
+          await tx.run("DELETE FROM oauth_consents WHERE id = ?", [consentId]);
+          outcome = "changed";
         }
         await insertAudit(tx, {
           actorUserId,
-          event: "consent.revoked",
+          event: "consent.deleted",
           result: outcome === "changed" ? "success" : outcome === "not_found" ? "failure" : "denied",
           requestId,
           metadata: { consentId, outcome }
@@ -1196,24 +1305,19 @@ export function createAuthRepositoryFromDb(db: AuthDb): AuthRepository {
       return outcome;
     },
     async revokeUserConsents(userId, actorUserId, requestId) {
-      const now = new Date().toISOString();
       let outcome: BulkRevokeOutcome = "not_found";
       await db.withWriteTransaction(async (tx) => {
         const user = await tx.get<UserRow>("SELECT * FROM users WHERE id = ? LIMIT 1", [userId]);
         if (!user) {
           outcome = "not_found";
         } else {
-          const active = await tx.get<{ count: number }>(
-            "SELECT COUNT(*) AS count FROM oauth_consents WHERE user_id = ? AND revoked_at IS NULL",
-            [userId]
-          );
+          const active = await tx.get<{ count: number }>("SELECT COUNT(*) AS count FROM oauth_consents WHERE user_id = ?", [
+            userId
+          ]);
           if (Number(active?.count ?? 0) < 1) {
             outcome = "no_active_targets";
           } else {
-            await tx.run("UPDATE oauth_consents SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL", [
-              now,
-              userId
-            ]);
+            await tx.run("DELETE FROM oauth_consents WHERE user_id = ?", [userId]);
             await enqueueJobInTx(tx, {
               idempotencyKey: `revoke-user-grants:${userId}:${requestId}`,
               payload: { userId },
@@ -1226,7 +1330,7 @@ export function createAuthRepositoryFromDb(db: AuthDb): AuthRepository {
         }
         await insertAudit(tx, {
           actorUserId,
-          event: "user.consents.revoked",
+          event: "user.consents.deleted",
           requestId,
           result: outcome === "changed" ? "success" : outcome === "not_found" ? "failure" : "denied",
           targetUserId: userId,
@@ -1236,7 +1340,6 @@ export function createAuthRepositoryFromDb(db: AuthDb): AuthRepository {
       return outcome;
     },
     async revokeProviderGrantBackedConsent(input) {
-      const now = new Date().toISOString();
       let outcome: RevokeOutcome = "mismatch";
       await db.withWriteTransaction(async (tx) => {
         const existing = await tx.get<ConsentRow>("SELECT * FROM oauth_consents WHERE id = ? LIMIT 1", [
@@ -1244,22 +1347,18 @@ export function createAuthRepositoryFromDb(db: AuthDb): AuthRepository {
         ]);
         if (!existing) {
           outcome = "not_found";
-        } else if (existing.revoked_at) {
-          outcome = "already_revoked";
         } else {
-          const revoked = await tx.get<ConsentRow>(
-            `UPDATE oauth_consents
-             SET revoked_at = ?
+          const deleted = await tx.get<ConsentRow>(
+            `DELETE FROM oauth_consents
              WHERE id = ?
                AND user_id = ?
                AND client_id = ?
                AND resource = ?
                AND scope_hash = ?
-               AND revoked_at IS NULL
              RETURNING *`,
-            [now, input.consentId, input.userId, input.clientId, input.resource, input.scopeHash]
+            [input.consentId, input.userId, input.clientId, input.resource, input.scopeHash]
           );
-          if (revoked) {
+          if (deleted) {
             await enqueueJobInTx(tx, {
               idempotencyKey: `revoke-provider-grant:${input.userId}:${input.grantId}:${input.requestId}`,
               payload: { grantId: input.grantId, userId: input.userId },
@@ -1305,10 +1404,7 @@ export function createAuthRepositoryFromDb(db: AuthDb): AuthRepository {
              WHERE id = ?`,
             [now, input.userId]
           );
-          await tx.run("UPDATE oauth_consents SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL", [
-            now,
-            input.userId
-          ]);
+          await tx.run("DELETE FROM oauth_consents WHERE user_id = ?", [input.userId]);
           await enqueueJobInTx(tx, {
             idempotencyKey: `revoke-user-authorization:${input.userId}:${input.requestId}`,
             payload: { userId: input.userId },
@@ -1338,7 +1434,7 @@ export function createAuthRepositoryFromDb(db: AuthDb): AuthRepository {
         "SELECT * FROM oauth_client_policies WHERE client_id = ? LIMIT 1",
         [props.client_id]
       );
-      if (!client || client.status !== "active" || client.client_version !== props.client_version) {
+      if (!client || client.client_version !== props.client_version) {
         throw new Error("Client authorization state is no longer current");
       }
       const consent = await db.get<ConsentRow>("SELECT * FROM oauth_consents WHERE id = ? LIMIT 1", [
@@ -1346,7 +1442,6 @@ export function createAuthRepositoryFromDb(db: AuthDb): AuthRepository {
       ]);
       if (
         !consent ||
-        consent.revoked_at ||
         consent.resource !== props.resource ||
         consent.client_id !== props.client_id ||
         consent.client_version !== props.client_version ||
@@ -1364,7 +1459,6 @@ export function createAuthRepositoryFromDb(db: AuthDb): AuthRepository {
       return {
         client: {
           id: client.client_id,
-          source: client.source,
           version: client.client_version
         },
         consentId: consent.id,
@@ -1538,6 +1632,7 @@ export function createAuthRepositoryFromDb(db: AuthDb): AuthRepository {
       const code = generateOtpCode();
       const now = new Date();
       const expiresAt = new Date(now.getTime() + input.ttlSeconds * 1000).toISOString();
+      const resendAfter = new Date(now.getTime() + (input.resendDelaySeconds ?? 60) * 1000).toISOString();
       const subjectId = crypto.randomUUID();
       const challengeId = crypto.randomUUID();
       const encryptedEmail = input.userId ? null : await encryptEmail(input.secrets, input.purpose, subjectId, email);
@@ -1573,12 +1668,114 @@ export function createAuthRepositoryFromDb(db: AuthDb): AuthRepository {
             input.secrets.OTP_PEPPER_CURRENT_VERSION,
             expiresAt,
             input.maxAttempts,
-            new Date(now.getTime() + 60_000).toISOString(),
+            resendAfter,
             now.toISOString()
           ]
         );
       });
-      return { code, id: challengeId, subjectId, ttlSeconds: input.ttlSeconds };
+      return { code, id: challengeId, resendAfter, subjectId, ttlSeconds: input.ttlSeconds };
+    },
+    async createOrReuseLoginOtpChallenge(input) {
+      return createOrReuseUserOtpChallenge(db, { ...input, purpose: "login" });
+    },
+    async createOrReuseUserOtpChallenge(input) {
+      return createOrReuseUserOtpChallenge(db, input);
+    },
+    async resendOtpChallenge(input) {
+      const row = await db.get<{
+        id: string;
+        subject_id: string;
+        purpose: string;
+        attempts: number;
+        max_attempts: number;
+        expires_at: string;
+        redeemed_at: string | null;
+        resend_after: string | null;
+        user_id: string | null;
+        encrypted_email: string | null;
+        user_email: string | null;
+        user_status: UserRow["status"] | null;
+      }>(
+        `SELECT otp_challenges.id, otp_challenges.subject_id, otp_challenges.purpose,
+                otp_challenges.attempts, otp_challenges.max_attempts, otp_challenges.expires_at,
+                otp_challenges.redeemed_at, otp_challenges.resend_after,
+                otp_subjects.user_id, otp_subjects.encrypted_email,
+                users.email AS user_email, users.status AS user_status
+         FROM otp_challenges
+         JOIN otp_subjects ON otp_subjects.subject_id = otp_challenges.subject_id
+         LEFT JOIN users ON users.id = otp_subjects.user_id
+         WHERE otp_challenges.id = ?
+         LIMIT 1`,
+        [input.id]
+      );
+      if (
+        !row ||
+        row.purpose !== input.purpose ||
+        row.redeemed_at ||
+        row.attempts >= row.max_attempts ||
+        Date.parse(row.expires_at) <= Date.now()
+      ) {
+        return { state: "invalid" };
+      }
+      if (row.user_id && (row.user_status !== "active" || !row.user_email)) {
+        return { state: "invalid" };
+      }
+      const resendAtMs = row.resend_after ? Date.parse(row.resend_after) : 0;
+      if (Number.isFinite(resendAtMs) && resendAtMs > Date.now()) {
+        return {
+          resendAfter: row.resend_after as string,
+          retryAfterSeconds: Math.max(1, Math.ceil((resendAtMs - Date.now()) / 1000)),
+          state: "too_early"
+        };
+      }
+      const email = row.user_id ? row.user_email : await decryptEmail(input.secrets, row.purpose, row.subject_id, row.encrypted_email);
+      if (!email) {
+        return { state: "invalid" };
+      }
+      const now = new Date();
+      const expiresAt = new Date(now.getTime() + input.ttlSeconds * 1000).toISOString();
+      const resendAfter = new Date(now.getTime() + input.resendDelaySeconds * 1000).toISOString();
+      const code = generateOtpCode();
+      const codeHash = await hmacHex(input.secrets.OTP_PEPPER_CURRENT, `${row.id}:${code}`);
+      let updated = false;
+      await db.withWriteTransaction(async (tx) => {
+        const challenge = await tx.get<{ id: string }>(
+          `UPDATE otp_challenges
+           SET code_hash = ?, pepper_version = ?, expires_at = ?, attempts = 0, resend_after = ?
+           WHERE id = ?
+             AND redeemed_at IS NULL
+             AND attempts < max_attempts
+             AND expires_at > ?
+             AND (resend_after IS NULL OR resend_after <= ?)
+           RETURNING id`,
+          [
+            codeHash,
+            input.secrets.OTP_PEPPER_CURRENT_VERSION,
+            expiresAt,
+            resendAfter,
+            row.id,
+            now.toISOString(),
+            now.toISOString()
+          ]
+        );
+        if (!challenge) {
+          return;
+        }
+        await tx.run("UPDATE otp_subjects SET expires_at = ? WHERE subject_id = ?", [expiresAt, row.subject_id]);
+        updated = true;
+      });
+      if (!updated) {
+        return { state: "invalid" };
+      }
+      return {
+        code,
+        email,
+        id: row.id,
+        resendAfter,
+        state: "resent",
+        ttlSeconds: input.ttlSeconds,
+        userId: row.user_id
+      };
     },
     async verifyOtpChallenge(input) {
       const row = await db.get<{
@@ -1803,7 +2000,7 @@ export function createAuthRepositoryFromDb(db: AuthDb): AuthRepository {
       );
     },
     async optimizeStorage() {
-      await db.run("PRAGMA optimize");
+      await db.pragma("optimize");
     }
   };
 }
@@ -2059,10 +2256,7 @@ async function setUserStateInTx(
     input.nowIso,
     input.userId
   ]);
-  await tx.run("UPDATE oauth_consents SET revoked_at = COALESCE(revoked_at, ?) WHERE user_id = ?", [
-    input.nowIso,
-    input.userId
-  ]);
+  await tx.run("DELETE FROM oauth_consents WHERE user_id = ?", [input.userId]);
   await enqueueJobInTx(tx, {
     idempotencyKey: `revoke-user-grants:${input.userId}:${input.requestId}`,
     payload: { userId: input.userId },
@@ -2114,13 +2308,10 @@ async function revokeUserConsentsInTx(
   requestId: string,
   nowIso: string
 ): Promise<BulkRevokeOutcome> {
-  const active = await tx.get<{ count: number }>(
-    "SELECT COUNT(*) AS count FROM oauth_consents WHERE user_id = ? AND revoked_at IS NULL",
-    [userId]
-  );
+  const active = await tx.get<{ count: number }>("SELECT COUNT(*) AS count FROM oauth_consents WHERE user_id = ?", [userId]);
   const outcome: BulkRevokeOutcome = Number(active?.count ?? 0) < 1 ? "no_active_targets" : "changed";
   if (outcome === "changed") {
-    await tx.run("UPDATE oauth_consents SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL", [nowIso, userId]);
+    await tx.run("DELETE FROM oauth_consents WHERE user_id = ?", [userId]);
     await enqueueJobInTx(tx, {
       idempotencyKey: `revoke-user-grants:${userId}:${requestId}`,
       payload: { userId },
@@ -2153,7 +2344,7 @@ async function revokeUserAuthorizationInTx(
      WHERE id = ?`,
     [nowIso, userId]
   );
-  await tx.run("UPDATE oauth_consents SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL", [nowIso, userId]);
+  await tx.run("DELETE FROM oauth_consents WHERE user_id = ?", [userId]);
   await enqueueJobInTx(tx, {
     idempotencyKey: `revoke-user-authorization:${userId}:${requestId}`,
     payload: { userId },
@@ -2191,7 +2382,7 @@ async function setUserGrantTimeoutInTx(
        updated_by = excluded.updated_by`,
     [userId, ttlSeconds, nowIso, actorUserId]
   );
-  await tx.run("UPDATE oauth_consents SET expires_at = ? WHERE user_id = ? AND revoked_at IS NULL", [expiresAt, userId]);
+  await tx.run("UPDATE oauth_consents SET expires_at = ? WHERE user_id = ?", [expiresAt, userId]);
   await insertAudit(tx, {
     actorUserId,
     event: "oauth.user_grant_timeout.updated",
@@ -2213,7 +2404,7 @@ async function clearUserGrantTimeoutInTx(
   const defaultGrantTtlSeconds = await getDefaultGrantTtlSecondsFromDb(tx);
   const expiresAt = expiresAtFromTtl(now, defaultGrantTtlSeconds);
   await tx.run("DELETE FROM user_oauth_policies WHERE user_id = ?", [userId]);
-  await tx.run("UPDATE oauth_consents SET expires_at = ? WHERE user_id = ? AND revoked_at IS NULL", [expiresAt, userId]);
+  await tx.run("UPDATE oauth_consents SET expires_at = ? WHERE user_id = ?", [expiresAt, userId]);
   await insertAudit(tx, {
     actorUserId,
     event: "oauth.user_grant_timeout.cleared",
@@ -2456,10 +2647,7 @@ async function setUserGrantTimeoutOverride(
            updated_by = excluded.updated_by`,
         [userId, ttlSeconds, nowIso, actorUserId]
       );
-      await tx.run("UPDATE oauth_consents SET expires_at = ? WHERE user_id = ? AND revoked_at IS NULL", [
-        expiresAt,
-        userId
-      ]);
+      await tx.run("UPDATE oauth_consents SET expires_at = ? WHERE user_id = ?", [expiresAt, userId]);
       outcome = "changed";
     }
     await insertAudit(tx, {

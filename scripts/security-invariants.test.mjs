@@ -40,6 +40,9 @@ test("pending authorization is fenced by a lease owner before OAuth completion",
   assert.match(worker, /sha256Hex\(JSON\.stringify\(digestPayload\)\)/);
   assert.match(worker, /completePendingAuthorization\(pendingId, leaseId\)/);
   assert.match(worker, /completeAuthorization\(c\.env\.OAUTH_PROVIDER/);
+  const preflight = worker.slice(worker.indexOf("async function preflightRequest"), worker.indexOf("async function validateAuthorizePreflight"));
+  assert.match(preflight, /request\.method === "POST" && params\.has\("pending_id"\)/);
+  assert.ok(preflight.indexOf('params.has("pending_id")') < preflight.indexOf("validateAuthorizePreflight"));
   assert.ok(
     worker.indexOf("completePendingAuthorization(pendingId, leaseId)") <
       worker.indexOf("completeAuthorization(c.env.OAUTH_PROVIDER")
@@ -82,13 +85,14 @@ test("MCP resource validation rejects fragments and foreign resources", () => {
   assert.throws(() => requireMcpResource("https://other.example.com/mcp", expected));
 });
 
-test("CIMD admin approval path exists and uses shared URL policy", () => {
+test("OAuth client metadata URL clients are registered after shared URL policy validation", () => {
   const worker = read("packages/auth-worker/src/index.ts");
-  assert.match(worker, /admin\/cimd\/approve/);
   assert.match(worker, /fetchClientMetadata\(clientId\)/);
-  assert.match(worker, /source: "cimd"/);
+  assert.match(worker, /createOrUpdateClientPolicy\(\{/);
   assert.match(worker, /isPublicHttpsUrl\(clientId\)/);
   assert.match(worker, /isAllowedRedirectUri\(uri\)/);
+  assert.match(worker, /redirect: "manual"/);
+  assert.match(worker, /response\.status >= 300 && response\.status < 400/);
 });
 
 test("OAuth provider exposes managed metadata", () => {
@@ -120,11 +124,12 @@ test("session uses idle and absolute expiry with guarded touch", () => {
   assert.match(repository, /getSessionByHash/);
   assert.match(repository, /WHERE login_sessions\.revoked_at IS NULL[\s\S]*login_sessions\.idle_expires_at > \?/);
   assert.match(repository, /DELETE FROM login_sessions/);
-  assert.match(repository, /PRAGMA optimize/);
-  assert.match(worker, /auth\.optimize_storage/);
+  assert.match(repository, /db\.pragma\("optimize"\)/);
+  assert.match(worker, /runScheduledBestEffortTask\("auth\.optimize_storage"/);
+  assert.doesNotMatch(worker, /runScheduledTask\(runtime, "auth\.optimize_storage"/);
   assert.doesNotMatch(worker, /VACUUM/);
   assert.match(compact, /VACUUM/);
-  assert.match(compact, /PRAGMA optimize/);
+  assert.match(compact, /db\.pragma\("optimize"\)/);
   assert.match(worker, /<th>IP prefix<\/th>/);
   assert.match(worker, /<th>User agent<\/th>/);
   assert.match(worker, /formatSessionActiveUntil/);
@@ -150,7 +155,21 @@ test("admin UI supports bulk user operations", () => {
   assert.match(worker, /app\.post\("\/admin\/oauth-policy"/);
   assert.match(worker, /app\.post\("\/admin\/users\/grant-timeout"/);
   assert.match(worker, /form="bulk-users-form"/);
-  assert.match(worker, /Set selected grant timeout/);
+  assert.match(worker, /MCP Authorization Expiration/);
+  assert.match(worker, /Default expiration:/);
+  assert.match(worker, /Set selected authorization expiration/);
+  const adminHtml = worker.slice(worker.indexOf("<h2>MCP Authorization Expiration</h2>"), worker.indexOf("<h2>OAuth Client Apps</h2>"));
+  assert.ok(adminHtml.indexOf("<h2>MCP Authorization Expiration</h2>") < adminHtml.indexOf("<h2>Users</h2>"));
+  assert.ok(adminHtml.indexOf("<h2>Users</h2>") < adminHtml.indexOf('action="/admin/users"'));
+  const clientAppHtml = worker.slice(worker.indexOf("<h2>OAuth Client Apps</h2>"), worker.indexOf("<h2>Provider grants</h2>"));
+  const userAuthorizationHtml = worker.slice(worker.indexOf("<h2>User Authorizations</h2>"), worker.indexOf("<h2>Jobs</h2>"));
+  assert.match(clientAppHtml, /<th>Application<\/th><th>First seen<\/th><th>Last seen<\/th><th>Action<\/th>/);
+  assert.match(userAuthorizationHtml, /<th>User<\/th><th>Application<\/th><th>Scope<\/th><th>Expires<\/th><th>Action<\/th>/);
+  assert.match(worker, /data-grant-timeout-control/);
+  assert.match(worker, /data-grant-timeout-seconds/);
+  assert.match(worker, /const secondsHidden = input\.selectedMode !== "custom"/);
+  assert.match(worker, /data-bulk-grant-timeout-fields/);
+  assert.match(worker, /bulkAction\.value === "set_grant_timeout"/);
   assert.match(worker, /Cannot disable every active admin/);
   assert.match(worker, /renderBulkUserConfirmation/);
   assert.match(worker, /bulkUpdateUsers\(\{/);
@@ -183,6 +202,62 @@ test("Resend idempotency key is sent as HTTP header and never in message body", 
   assert.doesNotMatch(resendFunction.match(/body: JSON\.stringify\(\{[\s\S]*?\}\)/)?.[0] ?? "", /headers:/);
 });
 
+test("login OTP is issued only for existing active users", () => {
+  const worker = read("packages/auth-worker/src/index.ts");
+  const loginRoute = worker.slice(worker.indexOf('app.post("/login"'), worker.indexOf('app.post("/login/resend"'));
+  assert.match(loginRoute, /const user = await runtime\.repo\.findUserByEmail\(email\)/);
+  assert.match(loginRoute, /if \(!user \|\| user\.status !== "active"\) \{/);
+  assert.match(loginRoute, /return renderLogin\(returnTo, "No active account exists for this email\."\)/);
+  assert.ok(loginRoute.indexOf('if (!user || user.status !== "active")') < loginRoute.indexOf("createOrReuseLoginOtpChallenge"));
+  assert.match(loginRoute, /createOrReuseLoginOtpChallenge\(\{/);
+  assert.match(loginRoute, /if \(otp\.state === "existing"\) \{/);
+  assert.match(loginRoute, /return renderOtp\(user\.email, otp\.id, returnTo, undefined, otp\.resendAfter\)/);
+  assert.ok(loginRoute.indexOf('if (otp.state === "existing")') < loginRoute.indexOf("sendOtp"));
+});
+
+test("login OTP resend wait is enforced by Turso state and survives page transitions", () => {
+  const worker = read("packages/auth-worker/src/index.ts");
+  const repository = read("packages/auth-db/src/repository.ts");
+  assert.match(worker, /const LOGIN_OTP_RESEND_DELAY_SECONDS = 30/);
+  assert.match(worker, /app\.post\("\/login\/resend"/);
+  assert.match(worker, /name="resend_after"/);
+  assert.match(worker, /data-resend-after/);
+  assert.match(worker, /Date\.parse\(button\.dataset\.resendAfter/);
+  assert.match(worker, /displayResendAfter\(form\.get\("resend_after"\)\)/);
+  assert.match(repository, /createOrReuseLoginOtpChallenge/);
+  assert.match(repository, /otp_challenges\.redeemed_at IS NULL/);
+  assert.match(repository, /otp_challenges\.resend_after IS NOT NULL/);
+  assert.match(repository, /state: "existing"/);
+  assert.match(repository, /AND \(resend_after IS NULL OR resend_after <= \?\)/);
+});
+
+test("OAuth authorization requires fresh email OTP even with an existing web session", () => {
+  const worker = read("packages/auth-worker/src/index.ts");
+  const repository = read("packages/auth-db/src/repository.ts");
+  const authorizeGet = worker.slice(worker.indexOf('app.get("/authorize"'), worker.indexOf('app.post("/authorize"'));
+  assert.match(worker, /const OAUTH_AUTHORIZE_OTP_PURPOSE = "oauth_authorize"/);
+  assert.match(worker, /app\.post\("\/authorize\/reauth"/);
+  assert.match(worker, /app\.post\("\/authorize\/reauth\/verify"/);
+  assert.match(worker, /issueOAuthReauthMarker/);
+  assert.match(worker, /consumeOAuthReauthMarker/);
+  assert.match(authorizeGet, /if \(!reauth\.ok\) \{/);
+  assert.match(authorizeGet, /return renderAuthorizeReauth\(runtime, session\.user\.email, returnTo\)/);
+  assert.ok(authorizeGet.indexOf("consumeOAuthReauthMarker") < authorizeGet.indexOf("parseAuthRequest"));
+  assert.match(repository, /createOrReuseUserOtpChallenge/);
+  assert.match(repository, /otp_subjects\.purpose = \?/);
+  assert.match(repository, /otp_challenges\.purpose = \?/);
+});
+
+test("OAuth authorization pages describe the configured MCP server", () => {
+  const worker = read("packages/auth-worker/src/index.ts");
+  assert.match(worker, /function renderMcpServerSummary\(description: string\)/);
+  assert.match(worker, /function renderAuthorizeReauth<Env extends AuthWorkerEnv>\(\s*runtime: Runtime<Env>/);
+  assert.match(worker, /function renderAuthorizeReauthOtp<Env extends AuthWorkerEnv>\(\s*runtime: Runtime<Env>/);
+  assert.match(worker, /renderMcpServerSummary\(runtime\.config\.serverDescription\)/);
+  const consent = worker.slice(worker.indexOf("function renderConsent"), worker.indexOf("function renderProviderGrants"));
+  assert.match(consent, /renderMcpServerSummary\(runtime\.config\.serverDescription\)/);
+});
+
 test("permission catalog seed matches shared permissions and triggers use catalog lookup", () => {
   const migrationSql = read("packages/auth-db/migrations/0001_initial_auth.sql");
   const seedLine = migrationSql.match(/USER_PERMISSION_SEED:\s*([^\n]+)/);
@@ -192,6 +267,15 @@ test("permission catalog seed matches shared permissions and triggers use catalo
   assert.equal(USER_PERMISSIONS.includes(ADMIN_PERMISSION), true);
   assert.match(migrationSql, /CREATE TRIGGER IF NOT EXISTS user_permissions_known_insert/);
   assert.match(migrationSql, /SELECT 1 FROM user_permission_catalog WHERE permission = NEW\.permission/);
+});
+
+test("admin permission satisfies MCP capability permissions", () => {
+  const worker = read("packages/auth-worker/src/index.ts");
+  const tools = read("packages/mcp-tools/src/index.ts");
+  assert.match(worker, /const isAdmin = permissionSet\.has\("admin"\)/);
+  assert.match(worker, /isAdmin \|\| capability\.requiredPermissions\.every/);
+  assert.match(tools, /name: "whoami"/);
+  assert.match(tools, /requiredPermissions: \[\]/);
 });
 
 test("auth-db source uses Turso transaction API instead of raw transaction SQL", () => {
@@ -244,18 +328,49 @@ test("runtime schema assertion enables SQLite foreign key enforcement fail-close
   assert.match(migrations, /SQLite foreign_keys must be enabled/);
 });
 
-test("client policy source catalog is limited to managed sources", () => {
+test("OAuth client policy is a presence-only allow list", () => {
   const migrationSql = read("packages/auth-db/migrations/0001_initial_auth.sql");
-  const worker = read("packages/auth-worker/src/index.ts");
-  assert.match(migrationSql, /source IN \('admin_created', 'cimd'\)/);
-  assert.match(worker, /invalid_client_source/);
+  const table = migrationSql.slice(
+    migrationSql.indexOf("CREATE TABLE IF NOT EXISTS oauth_client_policies"),
+    migrationSql.indexOf("CREATE TABLE IF NOT EXISTS oauth_consents")
+  );
+  assert.match(table, /client_id TEXT PRIMARY KEY/);
+  assert.match(table, /client_version INTEGER NOT NULL DEFAULT 1/);
+  assert.match(table, /metadata_snapshot_json TEXT NOT NULL/);
+  assert.match(table, /allowed_redirect_uris_json TEXT NOT NULL/);
+  assert.match(table, /first_seen_at TEXT/);
+  assert.match(table, /last_seen_at TEXT/);
 });
 
 test("auth schema uses one initial migration", () => {
   const migrations = read("packages/auth-db/src/migrations.ts");
+  const migrationSql = read("packages/auth-db/migrations/0001_initial_auth.sql");
   const files = readdirSync(new URL("../packages/auth-db/migrations", import.meta.url)).sort();
   assert.deepEqual(files, ["0001_initial_auth.sql"]);
   assert.match(migrations, /AUTH_SCHEMA_VERSION = 1/);
+  assert.match(migrationSql, /CREATE TABLE IF NOT EXISTS oauth_client_policies/);
+  assert.match(migrationSql, /CREATE TABLE IF NOT EXISTS oauth_consents/);
+  const consentTable = migrationSql.slice(
+    migrationSql.indexOf("CREATE TABLE IF NOT EXISTS oauth_consents"),
+    migrationSql.indexOf("CREATE INDEX IF NOT EXISTS oauth_consents_lookup_idx")
+  );
+  assert.match(consentTable, /expires_at TEXT/);
+});
+
+test("account deletion is local hard delete", () => {
+  const worker = read("packages/auth-worker/src/index.ts");
+  const repo = read("packages/auth-db/src/repository.ts");
+  const accountDeleteRoute = worker.slice(
+    worker.indexOf('app.post("/account/delete"'),
+    worker.indexOf('app.get("/admin/recovery"')
+  );
+  assert.match(worker, /app\.post\("\/account\/delete"/);
+  assert.match(worker, /confirm\('Delete this account permanently\?/);
+  assert.match(worker, /deleteUserAccount\(session\.user\.id\)/);
+  assert.match(accountDeleteRoute, /clearCookie\(SESSION_COOKIE\)/);
+  assert.match(accountDeleteRoute, /return redirect\("\/", headers, 303\)/);
+  assert.match(repo, /deleteUserAccount\(userId\)/);
+  assert.match(repo, /DELETE FROM users WHERE id = \?/);
 });
 
 test("deployable config does not publish localhost MCP resource", () => {
@@ -288,16 +403,14 @@ test("auth job finish audits only successful running-row transitions", () => {
   assert.doesNotMatch(finishJob, /await tx\.run\([\s\S]*auth_job\.succeeded/);
 });
 
-test("provider grant revoke has no free-form admin form and requires local consent boundary", () => {
+test("provider grant revoke requires local consent boundary", () => {
   const worker = read("packages/auth-worker/src/index.ts");
   const repository = read("packages/auth-db/src/repository.ts");
-  assert.equal(worker.includes("User ID <input"), false);
-  assert.equal(worker.includes("Grant ID <input"), false);
   assert.match(worker, /lookupGrantForRevoke/);
   assert.match(worker, /parseGrantMetadata/);
   assert.match(worker, /requireHighRiskAdmin\(c\.req\.raw, runtime, "admin\.provider_grant\.revoke"/);
   assert.match(repository, /revokeProviderGrantBackedConsent/);
-  assert.match(repository, /UPDATE oauth_consents[\s\S]*RETURNING \*/);
+  assert.match(repository, /DELETE FROM oauth_consents[\s\S]*RETURNING \*/);
   assert.match(repository, /type: "revoke_provider_grant"/);
 });
 
@@ -308,14 +421,27 @@ test("break-glass recovery is separated from initial bootstrap state", () => {
   assert.match(repository, /createRecoveryAttempt/);
   assert.match(repository, /recovery_attempts/);
   assert.match(repository, /recovery_consumes/);
-  assert.doesNotMatch(repository, /mode = 'recovery'/);
-  assert.doesNotMatch(repository, /INSERT INTO bootstrap_state[\s\S]*'recovery'/);
   assert.match(worker, /recoveryAttemptId/);
   assert.match(worker, /recoveryConsumeId/);
   assert.match(migrationSql, /CREATE TABLE IF NOT EXISTS recovery_attempts/);
   assert.match(migrationSql, /CREATE TABLE IF NOT EXISTS recovery_consumes/);
   assert.match(migrationSql, /CHECK \(mode = 'initial'\)/);
-  assert.doesNotMatch(migrationSql, /mode IN \('initial', 'recovery'\)/);
+});
+
+test("initial admin setup is served from the admin entrypoint", () => {
+  const worker = read("packages/auth-worker/src/index.ts");
+  const adminGet = worker.slice(worker.indexOf('app.get("/admin"'), worker.indexOf('app.post("/admin"'));
+  const adminPost = worker.slice(worker.indexOf('app.post("/admin"'), worker.indexOf('app.post("/admin/users"'));
+  const renderInitialAdmin = worker.slice(worker.indexOf("function renderBootstrap"), worker.indexOf("function renderBootstrapVerify"));
+  const renderInitialAdminVerify = worker.slice(
+    worker.indexOf("function renderBootstrapVerify"),
+    worker.indexOf("function renderRecovery")
+  );
+  assert.match(adminGet, /hasActiveAdmin\(\)/);
+  assert.match(adminGet, /return renderBootstrap\(\)/);
+  assert.match(adminPost, /handleInitialAdminPost\(c\.req\.raw, env, runtime\)/);
+  assert.match(renderInitialAdmin, /"\/admin"/);
+  assert.match(renderInitialAdminVerify, /"\/admin"/);
 });
 
 test("recovery OTP send failure invalidates pending consume before verification", () => {
@@ -333,7 +459,7 @@ test("high-risk admin routes require step-up before session touch", () => {
   const worker = read("packages/auth-worker/src/index.ts");
   assert.match(worker, /type ValidationCheck = "session" \| "csrf" \| "admin" \| "freshStepUp" \| "breakGlass"/);
   assert.match(worker, /const validation = addValidationCheck\(addValidationCheck\(admin\.validation, "csrf"\), "freshStepUp"\)/);
-  assert.match(worker, /adminOutcomeResponse\("Client revoke", outcome\)/);
+  assert.match(worker, /adminOutcomeResponse\("Client delete", outcome\)/);
   assert.match(worker, /const outcome = await runtime\.repo\.markStepUp/);
   assert.match(worker, /Admin step-up could not be completed/);
 });

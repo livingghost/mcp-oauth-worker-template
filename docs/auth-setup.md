@@ -77,8 +77,8 @@ Initial admin bootstrap is only the first admin seed. Additional admins are crea
 
 - `ACCESS_TOKEN_TTL_SECONDS` is in seconds. The default is 600 seconds and the maximum is 3600 seconds.
 - `REFRESH_TOKEN_TTL_SECONDS` is in seconds when set. It is unset by default, which means provider refresh grants do not expire by time.
-- Local OAuth grant timeout is managed by `auth_settings`, `user_oauth_policies`, and `oauth_consents.expires_at`.
-- The admin UI can set a global default timeout, set per-user override/inherit/unlimited timeout, or update selected users in bulk.
+- Local MCP authorization expiration is managed by `auth_settings`, `user_oauth_policies`, and `oauth_consents.expires_at`.
+- The admin UI can set a global default expiration, set per-user override/inherit/no-expiration behavior, or update selected users in bulk.
 - Non-expiring provider refresh grants are controlled by local consent expiry, admin revoke, user authorization revoke, client revoke, user disable, and local consent/version checks.
 - Web/admin sessions are separate from MCP bearer access. They use idle and absolute expiry.
 
@@ -99,10 +99,11 @@ Initial admin bootstrap is only the first admin seed. Additional admins are crea
 - PKCE S256 is required.
 - Implicit flow, plain PKCE, and token exchange grant are disabled.
 - OAuth metadata advertises the deployed authorization, token, and protected resource endpoints.
-- CIMD is exact URL allowlist by default.
+- URL-based OAuth client metadata is fetched only from public HTTPS URLs and accepted only after redirect URI validation.
+- Non-URL client IDs must already exist in the local OAuth client app table.
 - Existing grants are not revoked by new authorization; revocation is explicit through local policy/version checks.
 - Individual provider grant revoke requires provider grant metadata to match an active local consent. If metadata is missing or stale, use the bulk user authorization revoke path.
-- Admin bulk user operations can disable/enable users, revoke sessions, revoke local grants, revoke all authorization, or set grant timeout for selected users. They require step-up, show a confirmation page, and execute through one repository transaction.
+- Admin bulk user operations can disable/enable users, revoke sessions, revoke local authorizations, revoke all authorization, or set MCP authorization expiration for selected users. They require step-up, show a confirmation page, and execute through one repository transaction.
 
 ## Recovery
 

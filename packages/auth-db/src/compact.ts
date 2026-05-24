@@ -17,5 +17,5 @@ const db = createAuthDb({
 });
 
 await db.run("VACUUM");
-await db.run("PRAGMA optimize");
+await db.pragma("optimize");
 console.log("Auth database compacted");

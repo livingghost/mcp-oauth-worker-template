@@ -1,45 +1,47 @@
 # MCP OAuth Worker
 
-OAuth 2.1 protected MCP server for Cloudflare Workers. The template uses `@cloudflare/workers-oauth-provider` as the OAuth provider, requires email OTP login for MCP authorization, stores durable auth data in Turso Cloud, and keeps OAuth provider internal state in Cloudflare KV.
+Reusable Cloudflare Workers template for an OAuth 2.1 protected remote MCP server.
 
-## Current Structure
+The template provides email OTP login, OAuth authorization, admin operations, Turso-backed auth persistence, and a protected `/mcp` endpoint. Project-specific MCP tools live in `packages/mcp-tools`; the auth layer is reusable across MCP projects.
+
+## Structure
 
 ```txt
 apps/mcp-worker
-  deployable Cloudflare Worker
+  Deployable Cloudflare Worker assembly.
 
 packages/auth-worker
-  OAuth provider composition, login, admin, consent, preflight, scheduled jobs
+  OAuth provider composition, login, admin UI, consent, token validation, scheduled jobs.
 
 packages/auth-db
-  Turso repository, migrations, atomic/CAS APIs, operational maintenance scripts
+  Turso repository, clean initial migration, atomic transactions, maintenance scripts.
 
 packages/mcp-tools
-  MCP server and capability registry
+  MCP server factory, capability registry, tools, resources, and prompts.
 
 packages/shared
-  shared OAuth scopes, token props, AuthContext, utilities
+  OAuth scopes, token props, AuthContext, permissions, shared utilities.
 ```
 
-`packages/mcp-tools` does not depend on `packages/auth-db`. MCP tools receive authorization through `AuthContext` and `AuthorizationRuntime`.
+`packages/mcp-tools` must not depend on `packages/auth-db`. Tool authorization is injected through `AuthContext` and `AuthorizationRuntime`.
 
 ## Security Model
 
-- Public clients only.
+- Public OAuth clients only.
 - PKCE S256 is required.
-- OAuth implicit flow, plain PKCE, and token exchange grant are disabled.
-- `/authorize`, `/token`, and `/mcp` are fail-closed before and after provider handling.
-- `/mcp` rechecks `unwrapToken()` output against current Turso user, client, consent, scope, and version state.
-- OTP, initial bootstrap, break-glass recovery, pending authorization, rate limiting, last-active-admin checks, and audit are handled by Turso repository atomic APIs.
-- Login sessions split idle TTL and absolute TTL. Session touch is allowed only through route policy and validated context.
-- The admin session list shows active sessions only, with session fingerprint, IP prefix, user-agent hash, last seen, last touched, active-until, and absolute-until columns.
-- Provider grant revoke is allowed only when provider metadata matches an active local consent. The local consent is revoked first.
-- `OAUTH_KV` is reserved for `@cloudflare/workers-oauth-provider`.
-- `AUTH_FLOW_KV` is reserved for short-lived pending authorization UI payloads.
-- Auth data is stored only in the Turso database referenced by `AUTH_TURSO_DATABASE_URL`.
-- `MCP_RESOURCE_URI` must be an explicit HTTPS URL in deployable config. Localhost is accepted only in local development with `ALLOW_LOCAL_RESOURCE_URI=true`.
-
-These constraints are the design basis for treating MCP access as authentication-required.
+- OAuth implicit flow, plain PKCE, token exchange, and confidential client auth are rejected.
+- URL-based OAuth client metadata is fetched only from public HTTPS URLs and accepted only after redirect URI validation.
+- `/authorize`, `/token`, and `/mcp` fail closed before and after provider handling.
+- `/mcp` rechecks bearer token props against current Turso user, client, consent, scope, permission, and version state.
+- Email OTP is required for login, initial admin setup, admin step-up, recovery, and OAuth authorization confirmation.
+- Login OTPs are issued only for existing active users, except initial admin setup and recovery flows.
+- Web sessions have idle and absolute expiry. Session touch is allowed only through route policy after required checks.
+- MCP refresh grants are non-expiring by default. Access tokens stay short-lived.
+- MCP authorization expiration is controlled locally through admin global, per-user, and bulk policies.
+- Revoking a local authorization deletes the local consent row. Provider grant cleanup is queued separately when applicable.
+- `OAUTH_KV` stores provider internals only.
+- `AUTH_FLOW_KV` stores short-lived authorization UI and reauth payloads only.
+- Durable auth data is stored in the Turso database referenced by `AUTH_TURSO_DATABASE_URL`.
 
 ## Requirements
 
@@ -47,10 +49,10 @@ These constraints are the design basis for treating MCP access as authentication
 - pnpm `11.3.0`
 - Cloudflare Wrangler `4.94.0`
 - Turso Cloud database
-- Resend API key
+- Resend API key and verified sender
 - Two Cloudflare KV namespaces
 
-The dependency decisions are recorded in [docs/dependency-decisions.md](docs/dependency-decisions.md).
+Dependency decisions are recorded in [docs/dependency-decisions.md](docs/dependency-decisions.md).
 
 ## Setup
 
@@ -63,8 +65,8 @@ pnpm install
 Create Cloudflare KV namespaces:
 
 ```powershell
-wrangler kv namespace create OAUTH_KV
-wrangler kv namespace create AUTH_FLOW_KV
+pnpm exec wrangler kv namespace create OAUTH_KV
+pnpm exec wrangler kv namespace create AUTH_FLOW_KV
 ```
 
 Create an auth Turso database and token:
@@ -81,7 +83,7 @@ Copy the local env template:
 Copy-Item apps/mcp-worker/.dev.vars.example apps/mcp-worker/.dev.vars
 ```
 
-Set at least these values:
+Set these values:
 
 ```txt
 AUTH_TURSO_DATABASE_URL
@@ -108,20 +110,22 @@ SESSION_IDLE_TTL_SECONDS=1800
 SESSION_TOUCH_INTERVAL_SECONDS=300
 ```
 
-`ACCESS_TOKEN_TTL_SECONDS` controls short-lived MCP bearer tokens. `REFRESH_TOKEN_TTL_SECONDS` is intentionally unset by default, so provider refresh grants do not expire by time. Local OAuth grant timeout is managed in the admin UI, with an unlimited default and optional global or per-user limits.
+Do not set `REFRESH_TOKEN_TTL_SECONDS` for the default MCP behavior. Provider refresh grants do not expire by time unless that variable is explicitly set.
 
-## Database Operations
+## Database
 
-Build the DB package and apply migrations before running or deploying the Worker:
+Apply the clean initial auth migration before running or deploying:
 
 ```powershell
 pnpm --filter @mcp-auth/auth-db run build
 pnpm --filter @mcp-auth/auth-db migrate
 ```
 
-Runtime DDL is intentionally forbidden. The Worker fails closed if the expected schema version is missing.
+Runtime DDL is intentionally forbidden. The Worker fails closed when the expected schema version is missing.
 
-Scheduled cleanup deletes expired short-lived auth data and old session rows. It also runs `PRAGMA optimize` as lightweight database maintenance. Full space reclamation with `VACUUM` is a manual operation:
+Scheduled cleanup deletes expired short-lived auth data and old session rows. It also runs `PRAGMA optimize` as lightweight database maintenance.
+
+Full compaction is explicit operator work:
 
 ```powershell
 $env:AUTH_TURSO_DATABASE_URL="libsql://..."
@@ -130,7 +134,7 @@ pnpm --filter @mcp-auth/auth-db run build
 pnpm --filter @mcp-auth/auth-db run compact
 ```
 
-Do not run full compaction from the Worker cron. `VACUUM` rewrites storage and should remain an explicit operator action.
+The compact command runs `VACUUM` and then `PRAGMA optimize`.
 
 ## Development
 
@@ -140,17 +144,9 @@ Run the Worker locally:
 pnpm dev
 ```
 
-The app package also exposes:
-
-```powershell
-pnpm --filter @mcp-auth/mcp-worker run dev
-```
-
-By default, local Wrangler runs on port `8788`.
+By default, local Wrangler uses port `8788`.
 
 ## Verification
-
-Run the full local verification set:
 
 ```powershell
 pnpm build
@@ -159,62 +155,46 @@ pnpm verify:dependencies
 pnpm --filter @mcp-auth/mcp-worker exec wrangler deploy --dry-run
 ```
 
-The current verification set covers:
-
-- raw SQL API not being exported from the auth DB package root
-- auth-worker not bypassing repository APIs
-- token endpoint public-client/resource preflight checks
-- OAuth provider authorization-code and refresh-token flow reaching the protected MCP handler
-- pending authorization lease fencing before OAuth completion
-- MCP tool package not depending on auth DB
-- redirect/client URL rejection for ambiguous and internal hosts
-- MCP resource rejection for fragments and foreign resources
-- CIMD admin approval path and URL policy use
-- OAuth metadata surface policy
-- idle/absolute session expiry and guarded touch
-- active session listing, session metadata visibility, scheduled cleanup, scheduled `PRAGMA optimize`, and manual `VACUUM` compaction script
-- Resend idempotency HTTP header
-- permission catalog drift
-- provider grant local consent boundary
-- break-glass recovery separation from initial bootstrap
+The verification set covers package boundaries, OAuth provider integration, protected MCP routing, URL policy, login OTP reuse/resend behavior, OAuth reauth, session expiry, admin bulk operations, Turso transaction rollback, provider grant boundaries, initial admin setup, and scheduled maintenance behavior.
 
 ## Deployment
 
-For the complete first-time deployment sequence, use [docs/trial-deploy.md](docs/trial-deploy.md).
+Use [docs/trial-deploy.md](docs/trial-deploy.md) for the complete empty-state deployment sequence.
 
 Update `apps/mcp-worker/wrangler.jsonc` with real KV namespace IDs and production vars. Store secrets through Wrangler:
 
 ```powershell
-wrangler secret put AUTH_TURSO_DATABASE_URL
-wrangler secret put AUTH_TURSO_DATABASE_TOKEN
-wrangler secret put RESEND_API_KEY
-wrangler secret put OTP_EMAIL_FROM
-wrangler secret put OTP_PEPPER_CURRENT
-wrangler secret put OTP_PEPPER_CURRENT_VERSION
-wrangler secret put OTP_SUBJECT_ENCRYPTION_KEY_CURRENT
-wrangler secret put OTP_SUBJECT_ENCRYPTION_KEY_CURRENT_VERSION
-wrangler secret put EMAIL_HASH_KEY_CURRENT
+pnpm --filter @mcp-auth/mcp-worker exec wrangler secret put AUTH_TURSO_DATABASE_URL
+pnpm --filter @mcp-auth/mcp-worker exec wrangler secret put AUTH_TURSO_DATABASE_TOKEN
+pnpm --filter @mcp-auth/mcp-worker exec wrangler secret put RESEND_API_KEY
+pnpm --filter @mcp-auth/mcp-worker exec wrangler secret put OTP_EMAIL_FROM
+pnpm --filter @mcp-auth/mcp-worker exec wrangler secret put OTP_PEPPER_CURRENT
+pnpm --filter @mcp-auth/mcp-worker exec wrangler secret put OTP_PEPPER_CURRENT_VERSION
+pnpm --filter @mcp-auth/mcp-worker exec wrangler secret put OTP_SUBJECT_ENCRYPTION_KEY_CURRENT
+pnpm --filter @mcp-auth/mcp-worker exec wrangler secret put OTP_SUBJECT_ENCRYPTION_KEY_CURRENT_VERSION
+pnpm --filter @mcp-auth/mcp-worker exec wrangler secret put EMAIL_HASH_KEY_CURRENT
 ```
 
-Then deploy:
+Deploy:
 
 ```powershell
 pnpm run deploy
 ```
 
+Open `/admin` after deployment. If no active admin exists, `/admin` shows the initial admin setup flow for `BOOTSTRAP_ADMIN_EMAILS`.
+
 ## Admin Operations
 
-- Initial admin bootstrap uses `BOOTSTRAP_ADMIN_EMAILS` and email OTP.
-- Additional admins are created from `/admin` after login and admin step-up OTP.
-- The admin UI supports users, bulk user actions, global/per-user OAuth grant timeout, active sessions, consents, clients, CIMD approval, provider grant lookup/revoke, jobs, and audit browsing.
-- Expired or revoked web sessions disappear from the active session list and are deleted by scheduled cleanup after retention.
-- Recovery is an attempt-based break-glass flow separate from initial bootstrap. It requires recovery env, nonce, OTP, security contact notification, one-time consume, and audit.
-
-See [docs/auth-setup.md](docs/auth-setup.md) for operational details.
+- Initial admin setup uses `BOOTSTRAP_ADMIN_EMAILS` and email OTP.
+- Additional admins are created from `/admin` after admin login and step-up OTP.
+- The admin UI supports users, bulk user actions, MCP authorization expiration, active sessions, user authorizations, OAuth client apps, provider grant lookup/revoke, jobs, and audit browsing.
+- Active session rows show session fingerprint, IP prefix, user-agent hash, created time, last seen, last touched, active-until, and absolute-until.
+- Recovery is separate from initial admin setup and uses recovery attempts, recovery consumes, OTP, security contact notification, one-time consume, and audit.
 
 ## Documentation
 
 - [docs/implementation-plan.md](docs/implementation-plan.md): design and completion criteria
-- [docs/development-template.md](docs/development-template.md): how to extend the template with tools, scopes, and permissions
+- [docs/development-template.md](docs/development-template.md): how to extend the template
 - [docs/auth-setup.md](docs/auth-setup.md): setup and operations
+- [docs/trial-deploy.md](docs/trial-deploy.md): first deployment checklist
 - [docs/dependency-decisions.md](docs/dependency-decisions.md): dependency version decisions

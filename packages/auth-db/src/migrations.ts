@@ -85,27 +85,11 @@ export const AUTH_MIGRATIONS = [
         ON login_sessions(id_hash, revoked_at, idle_expires_at, absolute_expires_at)`,
       `CREATE TABLE IF NOT EXISTS oauth_client_policies (
         client_id TEXT PRIMARY KEY,
-        source TEXT NOT NULL CHECK (source IN ('admin_created', 'cimd')),
-        status TEXT NOT NULL CHECK (status IN ('pending', 'active', 'blocked', 'revoked', 'failed')),
         client_version INTEGER NOT NULL DEFAULT 1,
         metadata_snapshot_json TEXT NOT NULL,
         allowed_redirect_uris_json TEXT NOT NULL,
         first_seen_at TEXT,
-        approved_at TEXT,
-        blocked_at TEXT,
-        revoked_at TEXT,
-        created_by TEXT,
-        updated_by TEXT,
         last_seen_at TEXT
-      )`,
-      `CREATE TABLE IF NOT EXISTS client_creation_requests (
-        request_id TEXT PRIMARY KEY,
-        actor_user_id TEXT NOT NULL,
-        request_json TEXT NOT NULL,
-        status TEXT NOT NULL CHECK (status IN ('pending', 'succeeded', 'failed')),
-        client_id TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
       )`,
       `CREATE TABLE IF NOT EXISTS oauth_consents (
         id TEXT PRIMARY KEY,
@@ -120,11 +104,10 @@ export const AUTH_MIGRATIONS = [
         redirect_uri TEXT NOT NULL,
         granted_at TEXT NOT NULL,
         expires_at TEXT,
-        revoked_at TEXT,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       )`,
       `CREATE INDEX IF NOT EXISTS oauth_consents_lookup_idx
-        ON oauth_consents(user_id, client_id, resource, scope_hash, revoked_at)`,
+        ON oauth_consents(user_id, client_id, resource, scope_hash)`,
 `CREATE TABLE IF NOT EXISTS otp_subjects (
   subject_id TEXT PRIMARY KEY,
   purpose TEXT NOT NULL,

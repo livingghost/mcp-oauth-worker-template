@@ -1,6 +1,6 @@
 # Dependency Decisions
 
-Checked on 2026-05-24 by querying `https://registry.npmjs.org/<package>/latest`.
+Checked on 2026-05-25 by querying `https://registry.npmjs.org/<package>/latest`.
 
 | Package | Adopted version | Registry latest | Decision |
 | --- | --- | --- | --- |

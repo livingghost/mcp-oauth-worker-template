@@ -98,7 +98,7 @@ For a workers.dev trial, set `MCP_RESOURCE_URI` to your deployed Worker URL plus
 }
 ```
 
-Do not set `REFRESH_TOKEN_TTL_SECONDS` for the default MCP behavior. Leaving it unset makes provider refresh grants non-expiring. Use the admin UI for global or per-user local grant timeout, and use revoke actions as the cutoff mechanism.
+Do not set `REFRESH_TOKEN_TTL_SECONDS` for the default MCP behavior. Leaving it unset makes provider refresh grants non-expiring. Use the admin UI for global or per-user MCP authorization expiration, and use revoke actions as the cutoff mechanism.
 
 ## 7. Put Worker Secrets
 
@@ -163,4 +163,4 @@ Scheduled Worker cleanup runs lightweight `PRAGMA optimize`; full `VACUUM` stays
 pnpm run deploy
 ```
 
-After deploy, open `/admin/bootstrap` on the Worker URL and use the email in `BOOTSTRAP_ADMIN_EMAILS`. The first admin is created only after that email completes OTP verification.
+After deploy, open `/admin` on the Worker URL. If no active admin exists, `/admin` shows the initial admin setup flow for the emails in `BOOTSTRAP_ADMIN_EMAILS`. The first admin is created only after that email completes OTP verification.

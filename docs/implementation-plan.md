@@ -31,7 +31,8 @@ Build an OAuth 2.1 protected remote MCP server on Cloudflare Workers and make MC
 ## Security Decisions
 
 - Published OAuth metadata is limited to deployed authorization, token, and protected resource endpoints.
-- CIMD allows only exact allowlisted `client_id` URLs by default.
+- URL-based OAuth client metadata is fetched only from public HTTPS URLs and accepted only after redirect URI validation.
+- The local OAuth client app table is a presence-only allow list.
 - `completeAuthorization()` always uses `revokeExistingGrants: false` so multiple devices and multiple grants can coexist with explicit revoke.
 - `/mcp` revalidates `unwrapToken()` output against current Turso user, client, and consent state after the provider authenticates the request.
 - `tokenExchangeCallback` is the final defense for stale authorization state and does not rely on provider-internal auth-code ordering for correctness.

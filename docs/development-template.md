@@ -45,12 +45,16 @@ apps/mcp-worker
 3. Recreate the clean auth schema before release, because this template keeps one initial migration until it is published.
 4. Update admin UX text only where operators assign that permission.
 
+## External API Configuration
+
+When a project needs per-issued-URL downstream API configuration, implement it in the project-specific layer. The shared package exposes `sealJson` and `unsealJson` for AES-GCM sealed payloads, but the core auth worker treats `MCP_RESOURCE_URI` as an exact OAuth resource and does not accept alternate resource URLs by default.
+
 ## Auth Boundary
 
 - `/mcp` must stay protected by the OAuth provider and then rechecked against Turso state.
 - Access tokens stay short-lived.
 - Provider refresh grants are non-expiring by default.
-- Local grant timeout and revoke are controlled by admin policy, per-user policy, consent state, user status, client status, and `authz_version`.
+- Local MCP authorization expiration and revoke are controlled by admin policy, per-user policy, consent state, user status, OAuth client app presence, and `authz_version`.
 - Admin bulk user changes must remain one repository transaction and must keep the last active admin guard.
 
 ## Verification

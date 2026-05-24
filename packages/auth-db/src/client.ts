@@ -16,6 +16,7 @@ export interface DbStatement {
 export interface DbContext {
   readonly inTransaction?: boolean;
   prepare(sql: string): Promise<DbStatement> | DbStatement;
+  pragma?(pragma: string): Promise<unknown>;
   transaction?(fn: () => unknown): { immediate: () => Promise<unknown> };
 }
 
@@ -23,6 +24,7 @@ interface BaseAuthDb {
   readonly ctx: DbContext;
   all<T = Record<string, unknown>>(sql: string, args?: SqlValue[]): Promise<T[]>;
   get<T = Record<string, unknown>>(sql: string, args?: SqlValue[]): Promise<T | null>;
+  pragma(pragma: string): Promise<unknown>;
   run(sql: string, args?: SqlValue[]): Promise<void>;
 }
 
@@ -76,6 +78,16 @@ function createBaseAuthDb(
       }
       const rows = await db.all<T>(sql, args);
       return rows[0] ?? null;
+    },
+    async pragma(pragma: string): Promise<unknown> {
+      assertAvailable?.();
+      if (!/^[A-Za-z_][A-Za-z0-9_]*(?:\s*=\s*(?:ON|OFF|[0-9]+))?$/.test(pragma)) {
+        throw new Error("Invalid PRAGMA statement");
+      }
+      if (ctx.pragma) {
+        return ctx.pragma(pragma);
+      }
+      return db.all(`PRAGMA ${pragma}`);
     },
     async run(sql: string, args: SqlValue[] = []): Promise<void> {
       assertAvailable?.();
