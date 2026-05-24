@@ -1,0 +1,26 @@
+{
+  "name": "@mcp-auth/auth-db",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --noEmit",
+    "lint": "tsc -b --noEmit",
+    "migrate": "node dist/migrate.js",
+    "compact": "node dist/compact.js"
+  },
+  "dependencies": {
+    "@mcp-auth/shared": "workspace:*",
+    "@tursodatabase/serverless": "1.2.0-pre.2"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}

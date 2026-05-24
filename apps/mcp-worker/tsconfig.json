@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "types": ["@cloudflare/workers-types"]
+  },
+  "include": ["src/**/*.ts", "worker-configuration.d.ts"],
+  "references": [
+    { "path": "../../packages/shared" },
+    { "path": "../../packages/auth-db" },
+    { "path": "../../packages/mcp-tools" },
+    { "path": "../../packages/auth-worker" }
+  ]
+}

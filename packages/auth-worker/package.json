@@ -1,0 +1,28 @@
+{
+  "name": "@mcp-auth/auth-worker",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --noEmit",
+    "lint": "tsc -b --noEmit"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "0.7.0",
+    "@mcp-auth/auth-db": "workspace:*",
+    "@mcp-auth/shared": "workspace:*",
+    "hono": "4.12.22",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "4.20260524.1",
+    "typescript": "6.0.3"
+  }
+}

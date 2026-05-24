@@ -1,0 +1,19 @@
+{
+  "name": "mcp-oauth-worker",
+  "version": "0.0.1",
+  "private": true,
+  "packageManager": "pnpm@11.3.0",
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "pnpm run build && pnpm --filter @mcp-auth/mcp-worker run dev",
+    "deploy": "pnpm run build && pnpm --filter @mcp-auth/mcp-worker run deploy",
+    "test": "node node_modules/typescript/bin/tsc -b && node --import ./scripts/register-cloudflare-workers-test-loader.mjs --test scripts/*.test.mjs packages/auth-worker/test/*.test.mjs",
+    "verify:dependencies": "node scripts/verify-dependency-decisions.mjs",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3",
+    "wrangler": "4.94.0"
+  }
+}

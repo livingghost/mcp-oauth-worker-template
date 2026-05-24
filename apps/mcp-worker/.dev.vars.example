@@ -1,0 +1,24 @@
+AUTH_TURSO_DATABASE_URL="libsql://your-auth-database.example.turso.io"
+AUTH_TURSO_DATABASE_TOKEN="your-auth-turso-token"
+
+RESEND_API_KEY="replace-with-resend-api-key"
+OTP_EMAIL_FROM="MCP Server <login@example.com>"
+OTP_EMAIL_REPLY_TO="support@example.com"
+
+MCP_RESOURCE_URI="http://localhost:8788/mcp"
+ALLOW_LOCAL_RESOURCE_URI="true"
+
+ACCESS_TOKEN_TTL_SECONDS="600"
+SESSION_ABSOLUTE_TTL_SECONDS="43200"
+SESSION_IDLE_TTL_SECONDS="1800"
+SESSION_TOUCH_INTERVAL_SECONDS="300"
+
+BOOTSTRAP_ADMIN_EMAILS="admin@example.com"
+
+OTP_PEPPER_CURRENT="replace-with-random-secret"
+OTP_PEPPER_CURRENT_VERSION="2026-05-24"
+
+OTP_SUBJECT_ENCRYPTION_KEY_CURRENT="replace-with-base64url-32-byte-key"
+OTP_SUBJECT_ENCRYPTION_KEY_CURRENT_VERSION="2026-05-24"
+
+EMAIL_HASH_KEY_CURRENT="replace-with-random-secret"

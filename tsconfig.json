@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/shared" },
+    { "path": "packages/auth-db" },
+    { "path": "packages/mcp-tools" },
+    { "path": "packages/auth-worker" },
+    { "path": "apps/mcp-worker" }
+  ]
+}

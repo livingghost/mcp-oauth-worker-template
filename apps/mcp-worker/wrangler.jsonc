@@ -1,0 +1,34 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "mcp-oauth-worker",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-24",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "observability": {
+    "enabled": true
+  },
+  "triggers": {
+    "crons": ["*/15 * * * *"]
+  },
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "00000000000000000000000000000000"
+    },
+    {
+      "binding": "AUTH_FLOW_KV",
+      "id": "00000000000000000000000000000000"
+    }
+  ],
+  "vars": {
+    "MCP_RESOURCE_URI": "https://mcp.example.com/mcp",
+    "ACCESS_TOKEN_TTL_SECONDS": "600",
+    "SESSION_ABSOLUTE_TTL_SECONDS": "43200",
+    "SESSION_IDLE_TTL_SECONDS": "1800",
+    "SESSION_TOUCH_INTERVAL_SECONDS": "300",
+    "BOOTSTRAP_ADMIN_EMAILS": "admin@example.com"
+  },
+  "dev": {
+    "port": 8788
+  }
+}

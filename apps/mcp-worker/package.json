@@ -1,0 +1,25 @@
+{
+  "name": "@mcp-auth/mcp-worker",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b",
+    "deploy": "pnpm --filter @mcp-auth/shared run build && pnpm --filter @mcp-auth/auth-db run build && pnpm --filter @mcp-auth/mcp-tools run build && pnpm --filter @mcp-auth/auth-worker run build && wrangler deploy",
+    "dev": "pnpm --filter @mcp-auth/shared run build && pnpm --filter @mcp-auth/auth-db run build && pnpm --filter @mcp-auth/mcp-tools run build && pnpm --filter @mcp-auth/auth-worker run build && wrangler dev",
+    "start": "wrangler dev",
+    "typecheck": "tsc -b --noEmit",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "@mcp-auth/auth-worker": "workspace:*",
+    "@mcp-auth/mcp-tools": "workspace:*",
+    "@mcp-auth/shared": "workspace:*",
+    "@modelcontextprotocol/sdk": "1.29.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "4.20260524.1",
+    "typescript": "6.0.3",
+    "wrangler": "4.94.0"
+  }
+}

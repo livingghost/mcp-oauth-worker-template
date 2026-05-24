@@ -1,0 +1,26 @@
+{
+  "name": "@mcp-auth/mcp-tools",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --noEmit",
+    "lint": "tsc -b --noEmit"
+  },
+  "dependencies": {
+    "@mcp-auth/shared": "workspace:*",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "agents": "0.13.2"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "4.20260524.1",
+    "typescript": "6.0.3"
+  }
+}
