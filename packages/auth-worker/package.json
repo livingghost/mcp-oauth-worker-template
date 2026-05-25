@@ -18,11 +18,11 @@
     "@cloudflare/workers-oauth-provider": "0.7.0",
     "@mcp-auth/auth-db": "workspace:*",
     "@mcp-auth/shared": "workspace:*",
-    "hono": "4.12.22",
+    "hono": "4.12.23",
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "4.20260524.1",
+    "@cloudflare/workers-types": "4.20260525.1",
     "typescript": "6.0.3"
   }
 }

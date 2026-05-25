@@ -41,6 +41,8 @@ packages/shared
 - MCP refresh grants are non-expiring by default. Access tokens stay short-lived.
 - MCP OAuth authorization expiration is controlled locally through admin global, per-user, and bulk policies.
 - Revoking a local authorization deletes the local consent row. Provider grant cleanup is queued separately when applicable.
+- `MCP_RESOURCE_URI` is a shared endpoint, not a secret. The authorization boundary is OAuth bearer tokens, local user permissions, local consent state, and current Turso state.
+- The Web UI shows the MCP endpoint only after login so users know what to register without treating the endpoint URL as a credential.
 - Web UI sessions, MCP OAuth user authorizations, MCP OAuth client apps, and OAuth provider token grants are separate admin concepts.
 - `OAUTH_KV` stores provider internals only.
 - `AUTH_FLOW_KV` stores short-lived authorization UI and reauth payloads only.

@@ -6,6 +6,7 @@ import { isAllowedRedirectUri, isPublicHttpsUrl } from "../packages/auth-worker/
 import { ADMIN_PERMISSION, USER_PERMISSIONS, requireMcpResource } from "../packages/shared/dist/index.js";
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+const readJson = (path) => JSON.parse(read(path));
 
 test("auth-db package root does not export raw SQL client APIs", () => {
   const index = read("packages/auth-db/src/index.ts");
@@ -147,7 +148,7 @@ test("session uses idle and absolute expiry with guarded touch", () => {
   const worker = read("packages/auth-worker/src/index.ts");
   const repository = read("packages/auth-db/src/repository.ts");
   const migrations = read("packages/auth-db/src/migrations.ts");
-  const wrangler = read("apps/mcp-worker/wrangler.jsonc");
+  const wrangler = readJson("apps/mcp-worker/wrangler.jsonc");
   const compact = read("packages/auth-db/src/compact.ts");
   assert.match(worker, /SESSION_IDLE_TTL_SECONDS/);
   assert.match(worker, /SESSION_ABSOLUTE_TTL_SECONDS/);
@@ -170,7 +171,7 @@ test("session uses idle and absolute expiry with guarded touch", () => {
   assert.match(worker, /<th>IP prefix<\/th>/);
   assert.match(worker, /<th>User agent<\/th>/);
   assert.match(worker, /formatSessionActiveUntil/);
-  assert.match(wrangler, /"crons": \["\*\/15 \* \* \* \*"\]/);
+  assert.deepEqual(wrangler.triggers?.crons, ["*/15 * * * *"]);
 });
 
 test("MCP refresh grants are non-expiring by default and access tokens stay short-lived", () => {
@@ -310,6 +311,13 @@ test("OAuth authorization requires fresh email OTP even with an existing web ses
 test("OAuth authorization pages describe the configured MCP server", () => {
   const worker = read("packages/auth-worker/src/index.ts");
   assert.match(worker, /function renderMcpServerSummary\(description: string\)/);
+  assert.match(worker, /function renderMcpEndpointPanel\(config: RuntimeConfig\)/);
+  assert.match(worker, /<strong>MCP endpoint<\/strong>/);
+  assert.match(worker, /value="\$\{escapeHtml\(config\.resource\)\}"/);
+  const home = worker.slice(worker.indexOf("function renderHome"), worker.indexOf("function renderAccountActions"));
+  assert.match(home, /if \(!email\) \{[\s\S]*Sign in[\s\S]*\}/);
+  assert.match(home, /renderMcpEndpointPanel\(runtime\.config\)/);
+  assert.doesNotMatch(home.match(/if \(!email\) \{[\s\S]*?\n  \}/)?.[0] ?? "", /renderMcpEndpointPanel/);
   assert.match(worker, /function renderAuthorizeReauth<Env extends AuthWorkerEnv>\(\s*runtime: Runtime<Env>/);
   assert.match(worker, /function renderAuthorizeReauthOtp<Env extends AuthWorkerEnv>\(\s*runtime: Runtime<Env>/);
   assert.match(worker, /renderMcpServerSummary\(runtime\.config\.serverDescription\)/);

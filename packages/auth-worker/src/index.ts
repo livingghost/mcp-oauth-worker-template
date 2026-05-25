@@ -2452,6 +2452,7 @@ function renderHome<Env extends AuthWorkerEnv>(runtime: Runtime<Env>, email?: st
         <h1>${escapeHtml(runtime.config.serverName)}</h1>
         ${serviceSummary}
         ${renderAccountActions(email, csrf, true)}
+        ${renderMcpEndpointPanel(runtime.config)}
     </body></html>`,
     csrf
   );
@@ -2477,7 +2478,17 @@ function renderAccountActions(email: string, csrf: string, includeDeleteAccount:
 function renderMcpServerSummary(description: string): string {
   return `<section>
       <p>${escapeHtml(description)}</p>
-      <p>Use this page to sign in to the web UI. MCP clients connect to the protected MCP endpoint and complete OAuth authorization separately.</p>
+    </section>`;
+}
+
+function renderMcpEndpointPanel(config: RuntimeConfig): string {
+  return `<section>
+      <p>Use this MCP endpoint in your MCP connector settings. The connector will open OAuth authorization and require email OTP verification.</p>
+      <div>
+        <label for="mcp-endpoint"><strong>MCP endpoint</strong></label><br>
+        <input id="mcp-endpoint" type="text" readonly value="${escapeHtml(config.resource)}" style="width:min(100%,42rem)" onclick="this.select()">
+        <button type="button" onclick="navigator.clipboard?.writeText(document.getElementById('mcp-endpoint').value)">Copy</button>
+      </div>
     </section>`;
 }
 

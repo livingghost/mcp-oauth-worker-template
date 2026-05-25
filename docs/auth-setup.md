@@ -71,6 +71,8 @@ BOOTSTRAP_ADMIN_EMAILS=admin@example.com
 
 `MCP_RESOURCE_URI` must be an https URL outside local development. A localhost resource URI is accepted only when `ALLOW_LOCAL_RESOURCE_URI=true`, which belongs in `.dev.vars` and not in production deploy config.
 
+`MCP_RESOURCE_URI` is the shared MCP endpoint and OAuth resource identifier. It is not a credential. Access is controlled by OAuth bearer tokens, local user permissions, local consent state, and current Turso state. The Web UI shows this endpoint only after login.
+
 Initial admin bootstrap is only the first admin seed. Additional admins are created in `/admin` after login and step-up OTP.
 
 ## Timeout Model

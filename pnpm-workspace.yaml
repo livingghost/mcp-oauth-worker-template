@@ -7,4 +7,5 @@ allowBuilds:
   sharp: true
   workerd: true
 minimumReleaseAgeExclude:
-  - '@cloudflare/workers-types@4.20260524.1'
+  - '@cloudflare/workers-types@4.20260525.1'
+  - hono@4.12.23

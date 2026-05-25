@@ -59,6 +59,8 @@ Every listed tool must have an `outputSchema` and return `structuredContent`. Co
 
 ## External API Configuration
 
+Use one shared MCP endpoint when a project does not need user-specific downstream API keys, workspaces, tenants, or connector configuration. In that shape, `MCP_RESOURCE_URI` is public routing metadata, not a secret; OAuth tokens, local user permissions, local consent state, and current Turso state are the authorization boundary.
+
 When a project needs per-issued-URL downstream API configuration, implement it in the project-specific layer. The shared package exposes `sealJson` and `unsealJson` for AES-GCM sealed payloads, but the core auth worker treats `MCP_RESOURCE_URI` as an exact OAuth resource and does not accept alternate resource URLs by default.
 
 Use this shape for issued MCP URLs:
