@@ -28,7 +28,7 @@ type ToolSecurityScheme = {
 const PROFILE_SCOPE = "profile" as const;
 const MCP_TOOL_SECURITY_SCHEMES = [{ type: "oauth2", scopes: [PROFILE_SCOPE] }] satisfies ToolSecurityScheme[];
 const TEMPLATE_MCP_INSTRUCTIONS =
-  "This is an OAuth-protected MCP server template. Use read-only tools for discovery and add domain-specific tools with clear descriptions, input schemas, output schemas, and safety annotations.";
+  "This is an OAuth-protected MCP server template. Use read-only tools for discovery and add domain-specific tools that explain the user task, identifier types, result shape, side effects, and whether data is returned inline or through an external URL.";
 
 const currentUserOutputSchema: OutputShape = {
   clientId: z.string(),

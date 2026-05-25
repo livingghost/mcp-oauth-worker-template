@@ -98,7 +98,7 @@ For a workers.dev trial, set `MCP_RESOURCE_URI` to your deployed Worker URL plus
 }
 ```
 
-Do not set `REFRESH_TOKEN_TTL_SECONDS` for the default MCP behavior. Leaving it unset makes provider refresh grants non-expiring. Use the admin UI for global or per-user MCP authorization expiration, and use revoke actions as the cutoff mechanism.
+Do not set `REFRESH_TOKEN_TTL_SECONDS` for the default MCP behavior. Leaving it unset makes provider refresh grants non-expiring. Use the admin UI for global or per-user MCP OAuth authorization expiration, and use revoke actions as the cutoff mechanism.
 
 ## 7. Put Worker Secrets
 

@@ -39,8 +39,9 @@ packages/shared
 - Login OTPs are issued only for existing active users, except initial admin setup and recovery flows.
 - Web sessions have idle and absolute expiry. Session touch is allowed only through route policy after required checks.
 - MCP refresh grants are non-expiring by default. Access tokens stay short-lived.
-- MCP authorization expiration is controlled locally through admin global, per-user, and bulk policies.
+- MCP OAuth authorization expiration is controlled locally through admin global, per-user, and bulk policies.
 - Revoking a local authorization deletes the local consent row. Provider grant cleanup is queued separately when applicable.
+- Web UI sessions, MCP OAuth user authorizations, MCP OAuth client apps, and OAuth provider token grants are separate admin concepts.
 - `OAUTH_KV` stores provider internals only.
 - `AUTH_FLOW_KV` stores short-lived authorization UI and reauth payloads only.
 - Durable auth data is stored in the Turso database referenced by `AUTH_TURSO_DATABASE_URL`.
@@ -189,8 +190,9 @@ Open `/admin` after deployment. If no active admin exists, `/admin` shows the in
 
 - Initial admin setup uses `BOOTSTRAP_ADMIN_EMAILS` and email OTP.
 - Additional admins are created from `/admin` after admin login and step-up OTP.
-- The admin UI supports users, bulk user actions, MCP authorization expiration, active sessions, user authorizations, OAuth client apps, provider grant lookup/revoke, jobs, and audit browsing.
-- Active session rows show session fingerprint, IP prefix, user-agent hash, created time, last seen, last touched, active-until, and absolute-until.
+- The admin UI supports users, bulk user actions, MCP OAuth authorization expiration, active Web UI sessions, MCP OAuth user authorizations, MCP OAuth client apps, OAuth provider token grant lookup/revoke, jobs, and audit browsing.
+- Active Web UI session rows show session fingerprint, IP prefix, user-agent hash, created time, last seen, last touched, active-until, and absolute-until.
+- MCP OAuth user authorizations control connector access. OAuth provider token grants are provider-internal token records used only for provider-level cleanup.
 - Recovery is separate from initial admin setup and uses recovery attempts, recovery consumes, OTP, security contact notification, one-time consume, and audit.
 
 ## Documentation

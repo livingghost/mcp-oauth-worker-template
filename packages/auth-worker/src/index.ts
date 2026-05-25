@@ -1123,7 +1123,7 @@ function createDefaultHandler<Env extends AuthWorkerEnv>(
     const outcome = parsed.inherit
       ? await runtime.repo.clearUserGrantTtlSeconds(userId, admin.user.id, runtime.requestId)
       : await runtime.repo.setUserGrantTtlSeconds(userId, parsed.ttlSeconds, admin.user.id, runtime.requestId);
-    const failed = adminOutcomeResponse("User authorization expiration update", outcome);
+    const failed = adminOutcomeResponse("User MCP OAuth expiration update", outcome);
     if (failed) {
       return failed;
     }
@@ -2876,7 +2876,7 @@ function renderProviderGrants<Env extends AuthWorkerEnv>(
     : "";
   return html(
     `<!doctype html><html><body>
-      <h1>${escapeHtml(runtime.config.serverName)} Provider grants</h1>
+      <h1>${escapeHtml(runtime.config.serverName)} OAuth Provider Token Grants</h1>
       <p>${escapeHtml(adminEmail)}</p>
       <p><a href="/admin">Admin</a></p>
       <table><thead><tr><th>Grant</th><th>Client</th><th>Scope</th><th>Consent</th><th>Action</th></tr></thead><tbody>${rows}</tbody></table>
@@ -2900,13 +2900,13 @@ function parseGrantTimeoutForm(
   if (mode === "custom") {
     const parsed = Number(secondsValue.trim());
     if (!Number.isInteger(parsed) || parsed <= 0 || parsed > MAX_GRANT_TTL_SECONDS) {
-      return new Response(`Authorization expiration must be a positive whole number of seconds up to ${MAX_GRANT_TTL_SECONDS}`, {
+      return new Response(`MCP OAuth expiration must be a positive whole number of seconds up to ${MAX_GRANT_TTL_SECONDS}`, {
         status: 400
       });
     }
     return { inherit: false, ttlSeconds: parsed };
   }
-  return new Response("Invalid authorization expiration mode", { status: 400 });
+  return new Response("Invalid MCP OAuth expiration mode", { status: 400 });
 }
 
 function parseBulkUserOperationAction(value: string): BulkUserOperationAction | null {
@@ -2931,15 +2931,15 @@ function formatBulkUserOperationAction(action: BulkUserOperationAction): string 
     return "Enable selected users";
   }
   if (action === "revoke_sessions") {
-    return "Revoke selected sessions";
+    return "Revoke selected Web UI sessions";
   }
   if (action === "revoke_grants") {
-    return "Revoke selected grants";
+    return "Revoke selected MCP OAuth grants";
   }
   if (action === "revoke_authorization") {
-    return "Revoke selected authorization";
+    return "Revoke selected MCP OAuth authorization";
   }
-  return "Set selected authorization expiration";
+  return "Set selected MCP OAuth expiration";
 }
 
 function formatGrantTimeout(ttlSeconds: number | null): string {
@@ -3013,7 +3013,7 @@ function renderBulkUserConfirmation<Env extends AuthWorkerEnv>(
     action === "set_grant_timeout"
       ? `<input type="hidden" name="bulk_grant_timeout_mode" value="${escapeHtml(grantTimeoutMode)}">
          <input type="hidden" name="bulk_grant_ttl_seconds" value="${escapeHtml(grantTtlSeconds)}">
-         <p>Authorization expiration: ${escapeHtml(formatGrantTimeoutMode(grantTimeoutMode, grantTtlSeconds))}</p>`
+         <p>MCP OAuth expiration: ${escapeHtml(formatGrantTimeoutMode(grantTimeoutMode, grantTtlSeconds))}</p>`
       : "";
   return html(`<!doctype html><html><body>
     <h1>${escapeHtml(runtime.config.serverName)} Admin</h1>
@@ -3139,18 +3139,18 @@ function renderAdmin<Env extends AuthWorkerEnv>(
             <form method="post" action="/admin/users/sessions/revoke">
               <input type="hidden" name="csrf_token" value="${csrf}">
               <input type="hidden" name="user_id" value="${escapeHtml(user.id)}">
-              <button type="submit">Revoke sessions</button>
+              <button type="submit">Revoke Web UI sessions</button>
             </form>
             <form method="post" action="/admin/users/consents/revoke">
               <input type="hidden" name="csrf_token" value="${csrf}">
               <input type="hidden" name="user_id" value="${escapeHtml(user.id)}">
-              <button type="submit">Revoke grants</button>
+              <button type="submit">Revoke MCP OAuth grants</button>
             </form>
-            <a href="/admin/provider-grants?user_id=${encodeURIComponent(user.id)}">Provider grants</a>
+            <a href="/admin/provider-grants?user_id=${encodeURIComponent(user.id)}">OAuth provider token grants</a>
             <form method="post" action="/admin/users/authorization/revoke">
               <input type="hidden" name="csrf_token" value="${csrf}">
               <input type="hidden" name="user_id" value="${escapeHtml(user.id)}">
-              <button type="submit">Revoke all authorization</button>
+              <button type="submit">Revoke MCP OAuth authorization</button>
             </form>
           </td>
         </tr>`
@@ -3161,10 +3161,10 @@ function renderAdmin<Env extends AuthWorkerEnv>(
         <select name="action" required>
           <option value="disable">Disable selected</option>
           <option value="enable">Enable selected</option>
-          <option value="revoke_sessions">Revoke selected sessions</option>
-          <option value="revoke_grants">Revoke selected grants</option>
-          <option value="revoke_authorization">Revoke selected authorization</option>
-          <option value="set_grant_timeout">Set selected authorization expiration</option>
+          <option value="revoke_sessions">Revoke selected Web UI sessions</option>
+          <option value="revoke_grants">Revoke selected MCP OAuth grants</option>
+          <option value="revoke_authorization">Revoke selected MCP OAuth authorization</option>
+          <option value="set_grant_timeout">Set selected MCP OAuth expiration</option>
         </select>
         <span data-bulk-grant-timeout-fields hidden>
           ${renderGrantTimeoutControl({
@@ -3195,7 +3195,7 @@ function renderAdmin<Env extends AuthWorkerEnv>(
           </td>
         </tr>`
     )
-    .join("") || `<tr><td colspan="4">No OAuth client apps</td></tr>`;
+    .join("") || `<tr><td colspan="4">No MCP OAuth client apps</td></tr>`;
   const sessionRows = sessions
     .map(
       (session) =>
@@ -3263,8 +3263,15 @@ function renderAdmin<Env extends AuthWorkerEnv>(
     `<!doctype html><html><body>
       <h1>${escapeHtml(runtime.config.serverName)} Admin</h1>
       ${renderAccountActions(adminEmail, csrf, false)}
-      <h2>MCP Authorization Expiration</h2>
-      <p>Default expiration: ${escapeHtml(formatGrantTimeout(defaultGrantTtlSeconds))}</p>
+      <h2>Scope Guide</h2>
+      <ul>
+        <li><strong>Web UI sessions</strong> are browser/admin login sessions. Revoking them signs users out of this UI and does not by itself delete MCP OAuth authorizations.</li>
+        <li><strong>MCP OAuth user authorizations</strong> are local user-client-resource-scope permissions. Revoking them removes MCP access and invalidates refresh-grant use through local state.</li>
+        <li><strong>MCP OAuth client apps</strong> are connector apps discovered from OAuth client metadata URLs and kept as a local allow list.</li>
+        <li><strong>OAuth provider token grants</strong> are provider-internal token records. Use MCP OAuth authorization revoke for the normal user access path.</li>
+      </ul>
+      <h2>MCP OAuth Authorization Expiration</h2>
+      <p>Default MCP OAuth expiration: ${escapeHtml(formatGrantTimeout(defaultGrantTtlSeconds))}</p>
       <form method="post" action="/admin/oauth-policy">
         <input type="hidden" name="csrf_token" value="${csrf}">
         ${renderGrantTimeoutControl({
@@ -3284,14 +3291,14 @@ function renderAdmin<Env extends AuthWorkerEnv>(
         ${permissionCheckboxes([])}
         <button type="submit">Add user</button>
       </form>
-      ${bulkUsersForm}<table><thead><tr><th>Select</th><th>Email</th><th>Authorization expiration</th><th>State</th><th>Revoke</th></tr></thead><tbody>${rows}</tbody></table>
-      <h2>OAuth Client Apps</h2>
-      <p>OAuth clients discovered from MCP connector metadata URLs. User-specific grants are shown under User Authorizations.</p>
+      ${bulkUsersForm}<table><thead><tr><th>Select</th><th>Email</th><th>MCP OAuth expiration</th><th>State</th><th>Access controls</th></tr></thead><tbody>${rows}</tbody></table>
+      <h2>MCP OAuth Client Apps</h2>
+      <p>Connector applications discovered from OAuth client metadata URLs. User-specific MCP access is shown under MCP OAuth User Authorizations.</p>
       <table><thead><tr><th>Application</th><th>First seen</th><th>Last seen</th><th>Action</th></tr></thead><tbody>${clientRows}</tbody></table>
-      <h2>Provider grants</h2>
-      <p>Open provider grants from a user row.</p>
-      <h2>Active sessions</h2><table><thead><tr><th>Session</th><th>User</th><th>Created</th><th>Last seen</th><th>Last touched</th><th>IP prefix</th><th>User agent</th><th>Active until</th><th>Absolute until</th><th>Action</th></tr></thead><tbody>${sessionRows}</tbody></table>
-      <h2>User Authorizations</h2><table><thead><tr><th>User</th><th>Application</th><th>Scope</th><th>Expires</th><th>Action</th></tr></thead><tbody>${consentRows}</tbody></table>
+      <h2>OAuth Provider Token Grants</h2>
+      <p>Open provider token grants from a user row only when provider-level cleanup needs inspection.</p>
+      <h2>Active Web UI Sessions</h2><table><thead><tr><th>Session</th><th>User</th><th>Created</th><th>Last seen</th><th>Last touched</th><th>IP prefix</th><th>User agent</th><th>Active until</th><th>Absolute until</th><th>Action</th></tr></thead><tbody>${sessionRows}</tbody></table>
+      <h2>MCP OAuth User Authorizations</h2><table><thead><tr><th>User</th><th>Application</th><th>Scope</th><th>Expires</th><th>Action</th></tr></thead><tbody>${consentRows}</tbody></table>
       <h2>Jobs</h2><table><thead><tr><th>Type</th><th>Status</th><th>Attempts</th><th>Updated</th></tr></thead><tbody>${jobRows}</tbody></table>
       <h2>Audit</h2><table><thead><tr><th>Created</th><th>Event</th><th>Result</th><th>Request</th></tr></thead><tbody>${auditRows}</tbody></table>
       ${renderGrantTimeoutScript()}

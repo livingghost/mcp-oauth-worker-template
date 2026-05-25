@@ -9,15 +9,16 @@ Build an OAuth 2.1 protected remote MCP server on Cloudflare Workers and make MC
 - `/authorize`, `/token`, and `/mcp` are fail-closed before and after provider handling, and published OAuth metadata points only at deployable endpoints.
 - Public client, PKCE S256, and resource/audience validation are mandatory.
 - URL-based OAuth clients are normalized from public HTTPS metadata; `private_key_jwt` clients are verified with RS256 JWKS.
-- MCP tool descriptors include title, description, input schema, output schema, annotations, OAuth security schemes, and structured content.
+- MCP tool descriptors include title, description, input schema, output schema, annotations, OAuth security schemes, structured content, explicit identifier types, result shape, and side-effect category.
 - User, client, and consent revocation are enforced immediately through current Turso repository state and version checks.
 - OTP, initial bootstrap, break-glass recovery, pending authorization, rate limiting, last-active-admin checks, and audit are handled by Turso atomic APIs.
 - Session idle TTL, absolute TTL, and touch policy are separated. Touch is possible only through route policy and validated context.
-- The admin session list shows active sessions only and includes session fingerprint, IP prefix, user-agent hash, last seen, last touched, active-until, and absolute-until.
-- Expired or revoked session rows are hidden from the active session list and removed by scheduled cleanup after retention.
+- The admin session list shows active Web UI sessions only and includes session fingerprint, IP prefix, user-agent hash, last seen, last touched, active-until, and absolute-until.
+- Expired or revoked Web UI session rows are hidden from the active Web UI session list and removed by scheduled cleanup after retention.
 - Scheduled database maintenance runs lightweight `PRAGMA optimize`.
 - Full storage compaction with `VACUUM` is available as an explicit operator command and is not executed from Worker cron.
 - Provider grant revoke first checks provider metadata against local consent and revokes local consent before queuing provider grant cleanup.
+- The admin UI separates Web UI sessions, MCP OAuth user authorizations, MCP OAuth client apps, and OAuth provider token grants.
 - `OAUTH_KV` is reserved for `@cloudflare/workers-oauth-provider` state and is not used as an authorization source of truth.
 - Auth packages are separated from MCP tool packages so the auth layer can be reused by another Worker project.
 - The test suite includes an OAuth provider authorization-code, refresh-token, and protected `/mcp` smoke test, not only source-string invariants.
@@ -49,6 +50,19 @@ Build an OAuth 2.1 protected remote MCP server on Cloudflare Workers and make MC
 - `OAUTH_KV`: provider internal state only.
 - `AUTH_FLOW_KV`: pending authorization UI payload only.
 - Turso: users, permission catalog, sessions, clients, consents, OTP, rate limit counters, initial bootstrap state, recovery attempts/consumes, pending authorization redeem marker, jobs, audit logs, migration state.
+
+## Project Configuration Pattern
+
+- Per-issued MCP URL downstream configuration belongs in the project-specific layer.
+- Generated URLs may carry sealed configuration. The database should store the owner, registration ID, creation time, last MCP access time, and non-secret external account/workspace identifiers.
+- Downstream API keys must not be stored in plaintext.
+- Hard-delete registration rows to revoke issued URLs.
+
+## Large Data Pattern
+
+- Do not proxy large file bodies through MCP tools by default.
+- Prefer provider-issued direct download URLs, presigned upload URLs, or multipart upload URLs.
+- Inline read/write tools should be reserved for bounded text or metadata and must describe client-side MCP size limits.
 
 ## Operational Requirements
 

@@ -77,9 +77,9 @@ Initial admin bootstrap is only the first admin seed. Additional admins are crea
 
 - `ACCESS_TOKEN_TTL_SECONDS` is in seconds. The default is 600 seconds and the maximum is 3600 seconds.
 - `REFRESH_TOKEN_TTL_SECONDS` is in seconds when set. It is unset by default, which means provider refresh grants do not expire by time.
-- Local MCP authorization expiration is managed by `auth_settings`, `user_oauth_policies`, and `oauth_consents.expires_at`.
-- The admin UI can set a global default expiration, set per-user override/inherit/no-expiration behavior, or update selected users in bulk.
-- Non-expiring provider refresh grants are controlled by local consent expiry, admin revoke, user authorization revoke, client revoke, user disable, and local consent/version checks.
+- Local MCP OAuth authorization expiration is managed by `auth_settings`, `user_oauth_policies`, and `oauth_consents.expires_at`.
+- The admin UI can set a global MCP OAuth expiration, set per-user override/inherit/no-expiration behavior, or update selected users in bulk.
+- Non-expiring provider refresh grants are controlled by local consent expiry, admin revoke, MCP OAuth user authorization revoke, client revoke, user disable, and local consent/version checks.
 - Web/admin sessions are separate from MCP bearer access. They use idle and absolute expiry.
 
 ## Login Model
@@ -90,8 +90,8 @@ Initial admin bootstrap is only the first admin seed. Additional admins are crea
 - Session cookies use `__Host-`, `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`, and no `Domain`.
 - Sessions have both idle expiry and absolute expiry.
 - Session touch is allowed only through the route registry after required checks such as session validation, CSRF, admin permission, and fresh step-up.
-- The admin session table lists active sessions only. It shows a session fingerprint, IP prefix, user-agent hash, created time, last seen, last touched, active-until, and absolute-until.
-- Expired or revoked sessions are not shown as active sessions. Scheduled cleanup deletes expired or revoked session rows after retention.
+- The admin session table lists active Web UI sessions only. It shows a session fingerprint, IP prefix, user-agent hash, created time, last seen, last touched, active-until, and absolute-until.
+- Expired or revoked Web UI sessions are not shown as active Web UI sessions. Scheduled cleanup deletes expired or revoked session rows after retention.
 
 ## OAuth Model
 
@@ -103,8 +103,10 @@ Initial admin bootstrap is only the first admin seed. Additional admins are crea
 - Token endpoint client authentication supports public clients and `private_key_jwt` clients with RS256 `jwks` / `jwks_uri` verification.
 - Non-URL client IDs must already exist in the local OAuth client app table.
 - Existing grants are not revoked by new authorization; revocation is explicit through local policy/version checks.
-- Individual provider grant revoke requires provider grant metadata to match an active local consent. If metadata is missing or stale, use the bulk user authorization revoke path.
-- Admin bulk user operations can disable/enable users, revoke sessions, revoke local authorizations, revoke all authorization, or set MCP authorization expiration for selected users. They require step-up, show a confirmation page, and execute through one repository transaction.
+- MCP OAuth user authorizations are local user-client-resource-scope consent rows.
+- MCP OAuth client apps are connector app metadata records kept as a local allow list.
+- OAuth provider token grants are provider-internal token records. Individual provider grant revoke requires provider grant metadata to match an active local consent. If metadata is missing or stale, use the bulk MCP OAuth user authorization revoke path.
+- Admin bulk user operations can disable/enable users, revoke Web UI sessions, revoke MCP OAuth grants, revoke all MCP OAuth authorization, or set MCP OAuth authorization expiration for selected users. They require step-up, show a confirmation page, and execute through one repository transaction.
 
 ## Recovery
 
@@ -116,7 +118,7 @@ If all app recovery paths fail, use the manual Turso operator runbook:
 2. Record operator identities, timestamp, and database snapshot.
 3. Apply the minimal Turso change needed to restore an admin.
 4. Increment all affected `authz_version` values.
-5. Revoke active sessions/grants through admin UI or job runner.
+5. Revoke active Web UI sessions and MCP OAuth authorizations through admin UI or job runner.
 6. Insert an audit record after service recovery.
 
 The manual runbook stays in operator procedure and audit records.
