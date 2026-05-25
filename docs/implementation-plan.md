@@ -8,6 +8,8 @@ Build an OAuth 2.1 protected remote MCP server on Cloudflare Workers and make MC
 
 - `/authorize`, `/token`, and `/mcp` are fail-closed before and after provider handling, and published OAuth metadata points only at deployable endpoints.
 - Public client, PKCE S256, and resource/audience validation are mandatory.
+- URL-based OAuth clients are normalized from public HTTPS metadata; `private_key_jwt` clients are verified with RS256 JWKS.
+- MCP tool descriptors include title, description, input schema, output schema, annotations, OAuth security schemes, and structured content.
 - User, client, and consent revocation are enforced immediately through current Turso repository state and version checks.
 - OTP, initial bootstrap, break-glass recovery, pending authorization, rate limiting, last-active-admin checks, and audit are handled by Turso atomic APIs.
 - Session idle TTL, absolute TTL, and touch policy are separated. Touch is possible only through route policy and validated context.
@@ -31,10 +33,12 @@ Build an OAuth 2.1 protected remote MCP server on Cloudflare Workers and make MC
 ## Security Decisions
 
 - Published OAuth metadata is limited to deployed authorization, token, and protected resource endpoints.
-- URL-based OAuth client metadata is fetched only from public HTTPS URLs and accepted only after redirect URI validation.
+- URL-based OAuth client metadata is fetched only from public HTTPS URLs and accepted only after redirect URI validation. ChatGPT connector metadata URLs are normalized to their matching redirect URI.
+- Token endpoint client authentication accepts public clients and `private_key_jwt` clients with RS256 JWKS verification.
 - The local OAuth client app table is a presence-only allow list.
 - `completeAuthorization()` always uses `revokeExistingGrants: false` so multiple devices and multiple grants can coexist with explicit revoke.
 - `/mcp` revalidates `unwrapToken()` output against current Turso user, client, and consent state after the provider authenticates the request.
+- `/mcp` retries token unwrap briefly after OAuth completion so a freshly issued token can become visible before connector setup fails.
 - `tokenExchangeCallback` is the final defense for stale authorization state and does not rely on provider-internal auth-code ordering for correctness.
 - High-risk admin operations require route policy, CSRF, step-up OTP, and transactional audit.
 - Bulk user admin operations are handled by one repository transaction and require a confirmation page.

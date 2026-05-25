@@ -20,11 +20,13 @@ test("auth-worker does not bypass repository with raw DB access", () => {
   assert.equal(worker.includes("repo.db"), false);
 });
 
-test("token endpoint preflight rejects confidential clients and requires MCP resource", () => {
+test("token endpoint preflight rejects shared-secret clients, validates client assertions, and requires MCP resource", () => {
   const worker = read("packages/auth-worker/src/index.ts");
   assert.match(worker, /params\.has\("client_secret"\)/);
-  assert.match(worker, /params\.has\("client_assertion"\)/);
   assert.match(worker, /return "confidential_client_not_allowed"/);
+  assert.match(worker, /CLIENT_ASSERTION_TYPE/);
+  assert.match(worker, /validatePrivateKeyJwtClientAssertion/);
+  assert.match(worker, /tokenEndpointAuthMethod === "private_key_jwt"/);
   assert.match(worker, /return "resource_required"/);
   assert.match(worker, /resourceValues\.length > 1/);
   assert.match(worker, /requireMcpResource\(resourceValues\[0\]/);
@@ -54,6 +56,16 @@ test("mcp-tools package has no auth-db dependency", () => {
   const source = read("packages/mcp-tools/src/index.ts");
   assert.equal(manifest.includes("@mcp-auth/auth-db"), false);
   assert.equal(source.includes("@mcp-auth/auth-db"), false);
+});
+
+test("template MCP sample tool exposes connector-readable descriptors", () => {
+  const source = read("packages/mcp-tools/src/index.ts");
+  assert.match(source, /ListToolsRequestSchema/);
+  assert.match(source, /name: "get_current_user"/);
+  assert.match(source, /outputSchema: currentUserOutputSchema/);
+  assert.match(source, /securitySchemes: MCP_TOOL_SECURITY_SCHEMES/);
+  assert.match(source, /structuredContent/);
+  assert.match(source, /await import\("agents\/mcp"\)/);
 });
 
 test("redirect and client URL policy rejects ambiguous or internal hosts", () => {
@@ -89,10 +101,18 @@ test("OAuth client metadata URL clients are registered after shared URL policy v
   const worker = read("packages/auth-worker/src/index.ts");
   assert.match(worker, /fetchClientMetadata\(clientId\)/);
   assert.match(worker, /createOrUpdateClientPolicy\(\{/);
+  assert.match(worker, /putProviderUrlClient\(env\.OAUTH_KV, clientId/);
   assert.match(worker, /isPublicHttpsUrl\(clientId\)/);
   assert.match(worker, /isAllowedRedirectUri\(uri\)/);
   assert.match(worker, /redirect: "manual"/);
+  assert.match(worker, /CLIENT_METADATA_FETCH_TIMEOUT_MS = 3_000/);
+  assert.match(worker, /signal: AbortSignal\.timeout\(CLIENT_METADATA_FETCH_TIMEOUT_MS\)/);
   assert.match(worker, /response\.status >= 300 && response\.status < 400/);
+  assert.match(worker, /CLIENT_METADATA_AUTH_METHODS = \["none", "private_key_jwt"\] as const/);
+  assert.match(worker, /synthesizeKnownClientMetadata/);
+  assert.match(worker, /url\.hostname !== "chatgpt\.com"/);
+  assert.match(worker, /\/connector\/oauth\/\$\{connectorId\}/);
+  assert.match(worker, /jwks_uri/);
 });
 
 test("OAuth provider exposes managed metadata", () => {
@@ -101,9 +121,23 @@ test("OAuth provider exposes managed metadata", () => {
   const publicClientCreationFlag = ["disallowPublicClient", "Reg", "istration"].join("");
   const publicClientCreationPath = ["/", "reg", "ister"].join("");
   assert.match(worker, new RegExp(`${publicClientCreationFlag}: true`));
+  assert.match(worker, /clientIdMetadataDocumentEnabled: false/);
+  assert.match(worker, /function renderOAuthServerMetadata/);
+  assert.match(worker, /token_endpoint_auth_methods_supported: \["none", "private_key_jwt"\]/);
+  assert.match(worker, /client_id_metadata_document_supported: true/);
   assert.equal(worker.includes(metadataEndpointKey), false);
   assert.match(worker, new RegExp(`url\\.pathname === "${publicClientCreationPath}"`));
   assert.match(worker, /status: request\.method === "GET" \? 404 : 405/);
+});
+
+test("MCP API handler tolerates freshly issued access token visibility delay", () => {
+  const worker = read("packages/auth-worker/src/index.ts");
+  const apiHandler = worker.slice(worker.indexOf("function createApiHandler"), worker.indexOf("function createDefaultHandler"));
+  assert.match(worker, /const ACCESS_TOKEN_UNWRAP_RETRY_DELAYS_MS = \[100, 250, 500, 1000\] as const/);
+  assert.match(worker, /async function unwrapOAuthTokenWithRetry<Props>/);
+  assert.match(apiHandler, /unwrapOAuthTokenWithRetry<OAuthTokenProps>\(helpers, bearer\)/);
+  assert.match(worker, /await sleep\(delayMs\)/);
+  assert.match(worker, /helpers\.unwrapToken<Props>\(bearer\)/);
 });
 
 test("session uses idle and absolute expiry with guarded touch", () => {
@@ -235,14 +269,26 @@ test("OAuth authorization requires fresh email OTP even with an existing web ses
   const worker = read("packages/auth-worker/src/index.ts");
   const repository = read("packages/auth-db/src/repository.ts");
   const authorizeGet = worker.slice(worker.indexOf('app.get("/authorize"'), worker.indexOf('app.post("/authorize"'));
+  const reauthStart = worker.slice(worker.indexOf('app.post("/authorize/reauth"'), worker.indexOf('app.post("/authorize/reauth/resend"'));
+  const reauthResend = worker.slice(worker.indexOf('app.post("/authorize/reauth/resend"'), worker.indexOf('app.post("/authorize/reauth/verify"'));
+  const reauthVerify = worker.slice(worker.indexOf('app.post("/authorize/reauth/verify"'), worker.indexOf('app.get("/authorize"'));
   assert.match(worker, /const OAUTH_AUTHORIZE_OTP_PURPOSE = "oauth_authorize"/);
   assert.match(worker, /app\.post\("\/authorize\/reauth"/);
   assert.match(worker, /app\.post\("\/authorize\/reauth\/verify"/);
+  assert.match(worker, /class CsrfError extends Error/);
+  assert.match(worker, /app\.onError\(\(error\) =>/);
   assert.match(worker, /issueOAuthReauthMarker/);
   assert.match(worker, /consumeOAuthReauthMarker/);
   assert.match(authorizeGet, /if \(!reauth\.ok\) \{/);
   assert.match(authorizeGet, /return renderAuthorizeReauth\(runtime, session\.user\.email, returnTo\)/);
   assert.ok(authorizeGet.indexOf("consumeOAuthReauthMarker") < authorizeGet.indexOf("parseAuthRequest"));
+  assert.match(reauthStart, /if \(isCsrfError\(error\)\)/);
+  assert.match(reauthStart, /try \{\s*await sendOtp/);
+  assert.match(reauthStart, /Could not send the code/);
+  assert.match(reauthResend, /if \(isCsrfError\(error\)\)/);
+  assert.match(reauthResend, /try \{\s*await sendOtp/);
+  assert.match(reauthResend, /Could not resend the code/);
+  assert.match(reauthVerify, /if \(isCsrfError\(error\)\)/);
   assert.match(repository, /createOrReuseUserOtpChallenge/);
   assert.match(repository, /otp_subjects\.purpose = \?/);
   assert.match(repository, /otp_challenges\.purpose = \?/);
@@ -274,7 +320,7 @@ test("admin permission satisfies MCP capability permissions", () => {
   const tools = read("packages/mcp-tools/src/index.ts");
   assert.match(worker, /const isAdmin = permissionSet\.has\("admin"\)/);
   assert.match(worker, /isAdmin \|\| capability\.requiredPermissions\.every/);
-  assert.match(tools, /name: "whoami"/);
+  assert.match(tools, /name: "get_current_user"/);
   assert.match(tools, /requiredPermissions: \[\]/);
 });
 

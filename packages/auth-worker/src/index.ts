@@ -5,7 +5,8 @@ import OAuthProvider, {
   type GrantSummary,
   type OAuthHelpers,
   type OAuthProviderOptions,
-  type TokenExchangeCallbackOptions
+  type TokenExchangeCallbackOptions,
+  type TokenSummary
 } from "@cloudflare/workers-oauth-provider";
 import {
   createAuthRepository,
@@ -213,12 +214,73 @@ const OAUTH_REAUTH_PREFIX = "oauth-reauth:";
 const OAUTH_AUTHORIZE_OTP_PURPOSE = "oauth_authorize";
 const LOGIN_OTP_RESEND_DELAY_SECONDS = 30;
 const MAX_GRANT_TTL_SECONDS = 7_776_000;
+const CLIENT_ASSERTION_TYPE = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+const CLIENT_METADATA_MAX_BYTES = 32_768;
+const CLIENT_METADATA_FETCH_TIMEOUT_MS = 3_000;
+const ACCESS_TOKEN_UNWRAP_RETRY_DELAYS_MS = [100, 250, 500, 1000] as const;
+const CLIENT_METADATA_AUTH_METHODS = ["none", "private_key_jwt"] as const;
+const CLIENT_METADATA_FETCH_HEADERS = {
+  Accept: "application/json",
+  "User-Agent": "McpOAuthWorkerTemplate/0.1"
+};
 const PENDING_PREFIX = "pending:";
 const SAFE_HEADERS = {
   "Cache-Control": "no-store",
   "Content-Type": "text/html; charset=utf-8",
   "Referrer-Policy": "no-referrer"
 };
+
+class CsrfError extends Error {
+  constructor() {
+    super("Invalid CSRF token");
+    this.name = "CsrfError";
+  }
+}
+
+type ClientMetadataAuthMethod = (typeof CLIENT_METADATA_AUTH_METHODS)[number];
+
+type ClientJsonWebKey = JsonWebKey & {
+  alg?: string;
+  kid?: string;
+  kty?: string;
+  use?: string;
+};
+
+interface ClientJsonWebKeySet {
+  keys: ClientJsonWebKey[];
+}
+
+interface ClientMetadataDocument {
+  raw: Record<string, unknown>;
+  redirectUris: string[];
+  tokenEndpointAuthMethod: ClientMetadataAuthMethod;
+  grantTypes: string[];
+  responseTypes: string[];
+  clientName?: string;
+  clientUri?: string;
+  logoUri?: string;
+  policyUri?: string;
+  tosUri?: string;
+  jwksUri?: string;
+  jwks?: ClientJsonWebKeySet;
+  contacts?: string[];
+}
+
+interface ProviderClientRecord {
+  clientId: string;
+  redirectUris: string[];
+  clientName?: string;
+  clientUri?: string;
+  logoUri?: string;
+  policyUri?: string;
+  tosUri?: string;
+  jwksUri?: string;
+  contacts?: string[];
+  grantTypes: string[];
+  responseTypes: string[];
+  registrationDate: number;
+  tokenEndpointAuthMethod: "none";
+}
 
 const pendingAuthorizationPayloadSchema = z.object({
   client_id: z.string().min(1),
@@ -295,7 +357,7 @@ export function buildOAuthProviderOptions<Env extends AuthWorkerEnv>(
     apiHandler: createApiHandler(env, runtime) as NonNullable<OAuthProviderOptions<Env>["apiHandler"]>,
     apiRoute: "/mcp",
     authorizeEndpoint: "/authorize",
-    clientIdMetadataDocumentEnabled: true,
+    clientIdMetadataDocumentEnabled: false,
     defaultHandler: createDefaultHandler(env, runtime),
     disallowPublicClientRegistration: true,
     refreshTokenTTL: runtime.config.refreshTokenTtlSeconds as number,
@@ -370,6 +432,9 @@ async function preflightRequest<Env extends AuthWorkerEnv>(
   runtime: Runtime<Env>
 ): Promise<Response | null> {
   const url = new URL(request.url);
+  if (url.pathname === "/.well-known/oauth-authorization-server") {
+    return addCorsHeaders(renderOAuthServerMetadata(url), request);
+  }
   if (url.pathname === "/mcp") {
     const origin = request.headers.get("Origin");
     if (origin && runtime.config.allowedOrigins.size > 0 && !runtime.config.allowedOrigins.has(origin)) {
@@ -385,7 +450,7 @@ async function preflightRequest<Env extends AuthWorkerEnv>(
     if (request.method === "POST" && params.has("pending_id")) {
       return null;
     }
-    const error = await validateAuthorizePreflight(params, runtime).catch((validationError) => {
+    const error = await validateAuthorizePreflight(params, env, runtime).catch((validationError) => {
       console.warn(validationError);
       return "temporarily_unavailable";
     });
@@ -398,7 +463,7 @@ async function preflightRequest<Env extends AuthWorkerEnv>(
     if (!(await consumeRequestRateLimit(runtime, env, request, "token", [rateSubject], 120, 60))) {
       return oauthError("rate_limited", 429);
     }
-    const error = await validateTokenPreflight(params, basicClientId, runtime).catch((validationError) => {
+    const error = await validateTokenPreflight(params, basicClientId, request.url, env, runtime).catch((validationError) => {
       console.warn(validationError);
       return "temporarily_unavailable";
     });
@@ -412,6 +477,7 @@ async function preflightRequest<Env extends AuthWorkerEnv>(
 
 async function validateAuthorizePreflight<Env extends AuthWorkerEnv>(
   params: URLSearchParams,
+  env: Env,
   runtime: Runtime<Env>
 ): Promise<string | null> {
   if (params.get("response_type") !== "code") {
@@ -433,13 +499,13 @@ async function validateAuthorizePreflight<Env extends AuthWorkerEnv>(
   if (!clientId) {
     return "client_id_required";
   }
-  const clientError = await validateClientPreflight(clientId, runtime);
-  if (clientError) {
-    return clientError;
-  }
   const redirectUri = params.get("redirect_uri");
   if (!redirectUri) {
     return "redirect_uri_required";
+  }
+  const clientError = await validateClientPreflight(clientId, env, runtime, redirectUri);
+  if (clientError) {
+    return clientError;
   }
   const policy = await runtime.repo.getClientPolicy(clientId);
   if (policy) {
@@ -454,16 +520,13 @@ async function validateAuthorizePreflight<Env extends AuthWorkerEnv>(
 async function validateTokenPreflight<Env extends AuthWorkerEnv>(
   params: URLSearchParams,
   basicClientId: string | null,
+  tokenEndpointUrl: string,
+  env: Env,
   runtime: Runtime<Env>
 ): Promise<string | null> {
   const grantType = params.get("grant_type");
   const clientId = basicClientId ?? params.get("client_id");
-  if (
-    basicClientId ||
-    params.has("client_secret") ||
-    params.has("client_assertion") ||
-    params.has("client_assertion_type")
-  ) {
+  if (basicClientId || params.has("client_secret")) {
     return "confidential_client_not_allowed";
   }
   if (!clientId) {
@@ -486,16 +549,29 @@ async function validateTokenPreflight<Env extends AuthWorkerEnv>(
   if (grantType === "authorization_code" && !params.get("code_verifier")) {
     return "pkce_verifier_required";
   }
-  const clientError = await validateClientPreflight(clientId, runtime);
+  const clientError = await validateClientPreflight(clientId, env, runtime, params.get("redirect_uri") ?? undefined);
   if (clientError) {
     return clientError;
+  }
+  const policy = await runtime.repo.getClientPolicy(clientId);
+  const metadata = policy ? clientMetadataFromPolicy(policy) : null;
+  if (metadata?.tokenEndpointAuthMethod === "private_key_jwt") {
+    const assertionError = await validatePrivateKeyJwtClientAssertion(
+      params,
+      clientId,
+      metadata,
+      tokenEndpointUrl,
+      env.AUTH_FLOW_KV
+    );
+    if (assertionError) {
+      return assertionError;
+    }
   }
   if (grantType === "authorization_code") {
     const redirectUri = params.get("redirect_uri");
     if (!redirectUri) {
       return "redirect_uri_required";
     }
-    const policy = await runtime.repo.getClientPolicy(clientId);
     if (policy && !parseJsonStringArray(policy.allowed_redirect_uris_json).includes(redirectUri)) {
       return "redirect_uri_not_registered";
     }
@@ -505,7 +581,9 @@ async function validateTokenPreflight<Env extends AuthWorkerEnv>(
 
 async function validateClientPreflight<Env extends AuthWorkerEnv>(
   clientId: string,
-  runtime: Runtime<Env>
+  env: Env,
+  runtime: Runtime<Env>,
+  expectedRedirectUri?: string
 ): Promise<string | null> {
   let policy = await runtime.repo.getClientPolicy(clientId);
   if (isUrlClientId(clientId)) {
@@ -513,10 +591,13 @@ async function validateClientPreflight<Env extends AuthWorkerEnv>(
       return "invalid_client_id_url";
     }
     if (!policy) {
-      const metadata = await fetchClientMetadata(clientId).catch((error) => {
-        console.warn(error);
-        return null;
-      });
+      const knownMetadata = synthesizeKnownClientMetadata(clientId, expectedRedirectUri);
+      const metadata =
+        knownMetadata ??
+        (await fetchClientMetadata(clientId).catch((error) => {
+          console.warn(error);
+          return null;
+        }));
       if (!metadata || metadata.redirectUris.length === 0 || metadata.redirectUris.some((uri) => !isAllowedRedirectUri(uri))) {
         return "invalid_client_metadata";
       }
@@ -526,8 +607,11 @@ async function validateClientPreflight<Env extends AuthWorkerEnv>(
         redirectUris: metadata.redirectUris,
         requestId: runtime.requestId
       });
+      policy = await runtime.repo.getClientPolicy(clientId);
+      await putProviderUrlClient(env.OAUTH_KV, clientId, metadata, policy?.first_seen_at ?? null);
       return null;
     }
+    await putProviderUrlClient(env.OAUTH_KV, clientId, clientMetadataFromPolicy(policy), policy.first_seen_at);
   }
   if (!policy) {
     return "client_not_allowed";
@@ -543,7 +627,7 @@ function createApiHandler<Env extends AuthWorkerEnv>(
     async fetch(request, requestEnv, ctx) {
       const bearer = request.headers.get("Authorization")?.replace(/^Bearer\s+/i, "") ?? "";
       const helpers = getOAuthApi(buildOAuthProviderOptions(env, runtime), requestEnv);
-      const token = await helpers.unwrapToken<OAuthTokenProps>(bearer);
+      const token = await unwrapOAuthTokenWithRetry<OAuthTokenProps>(helpers, bearer);
       if (!token) {
         return json({ error: "invalid_token" }, 401);
       }
@@ -580,11 +664,47 @@ function createApiHandler<Env extends AuthWorkerEnv>(
   };
 }
 
+async function unwrapOAuthTokenWithRetry<Props>(
+  helpers: OAuthHelpers,
+  bearer: string
+): Promise<TokenSummary<Props> | null> {
+  if (!bearer) {
+    return null;
+  }
+  let token = await helpers.unwrapToken<Props>(bearer);
+  if (token) {
+    return token;
+  }
+  let waitedMs = 0;
+  for (const delayMs of ACCESS_TOKEN_UNWRAP_RETRY_DELAYS_MS) {
+    waitedMs += delayMs;
+    await sleep(delayMs);
+    token = await helpers.unwrapToken<Props>(bearer);
+    if (token) {
+      console.info(`OAuth access token became readable after ${waitedMs}ms`);
+      return token;
+    }
+  }
+  return null;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function createDefaultHandler<Env extends AuthWorkerEnv>(
   env: Env,
   runtime: Runtime<Env>
 ): ExportedHandler<Env> {
   const app = new Hono<{ Bindings: Env & { OAUTH_PROVIDER: OAuthHelpers } }>();
+
+  app.onError((error) => {
+    console.warn(error);
+    if (isCsrfError(error)) {
+      return new Response("Form expired. Reload and try again.", { headers: SAFE_HEADERS, status: 400 });
+    }
+    return new Response("Internal Server Error", { status: 500 });
+  });
 
   app.get("/", async (c) => {
     const session = await runtime.repo.getSession(readCookie(c.req.raw, SESSION_COOKIE));
@@ -1332,13 +1452,20 @@ function createDefaultHandler<Env extends AuthWorkerEnv>(
   });
 
   app.post("/authorize/reauth", async (c) => {
+    const form = await c.req.raw.formData();
+    const returnTo = sanitizeAuthorizeReturnTo(String(form.get("return_to") ?? "/"));
     const session = await runtime.repo.getSession(readCookie(c.req.raw, SESSION_COOKIE));
     if (!session) {
-      return renderLogin(sanitizeReturnTo(String((await c.req.raw.clone().formData()).get("return_to") ?? "/")));
+      return renderLogin(returnTo);
     }
-    const form = await c.req.raw.formData();
-    assertCsrf(c.req.raw, form);
-    const returnTo = sanitizeAuthorizeReturnTo(String(form.get("return_to") ?? "/"));
+    try {
+      assertCsrf(c.req.raw, form);
+    } catch (error) {
+      if (isCsrfError(error)) {
+        return renderAuthorizeReauth(runtime, session.user.email, returnTo, "Authorization form expired. Try again.");
+      }
+      throw error;
+    }
     const email = normalizeEmail(String(form.get("email") ?? ""));
     if (email !== session.user.email) {
       return renderAuthorizeReauth(runtime, session.user.email, returnTo, "Use the signed-in account email.");
@@ -1363,7 +1490,19 @@ function createDefaultHandler<Env extends AuthWorkerEnv>(
     if (otp.state === "existing") {
       return renderAuthorizeReauthOtp(runtime, session.user.email, otp.id, returnTo, undefined, otp.resendAfter);
     }
-    await sendOtp(env, session.user.email, otp.code, otp.ttlSeconds, runtime.config.serverName, otp.id);
+    try {
+      await sendOtp(env, session.user.email, otp.code, otp.ttlSeconds, runtime.config.serverName, otp.id);
+    } catch (error) {
+      console.warn(error);
+      return renderAuthorizeReauthOtp(
+        runtime,
+        session.user.email,
+        otp.id,
+        returnTo,
+        "Could not send the code. Use resend after the countdown.",
+        otp.resendAfter
+      );
+    }
     return renderAuthorizeReauthOtp(runtime, session.user.email, otp.id, returnTo, undefined, otp.resendAfter);
   });
 
@@ -1373,10 +1512,17 @@ function createDefaultHandler<Env extends AuthWorkerEnv>(
       return new Response("Sign-in required", { status: 401 });
     }
     const form = await c.req.raw.formData();
-    assertCsrf(c.req.raw, form);
     const otpId = String(form.get("otp_id") ?? "");
     const returnTo = sanitizeAuthorizeReturnTo(String(form.get("return_to") ?? "/"));
     const resendAfter = displayResendAfter(form.get("resend_after"));
+    try {
+      assertCsrf(c.req.raw, form);
+    } catch (error) {
+      if (isCsrfError(error)) {
+        return renderAuthorizeReauthOtp(runtime, session.user.email, otpId, returnTo, "Authorization form expired. Try again.", resendAfter);
+      }
+      throw error;
+    }
     if (
       !(await runtime.repo.consumeRateLimits(
         [`oauth-reauth-resend:user:${session.user.id}`, `oauth-reauth-resend:otp:${otpId}`],
@@ -1406,7 +1552,19 @@ function createDefaultHandler<Env extends AuthWorkerEnv>(
     if (result.state === "invalid" || result.userId !== session.user.id) {
       return renderAuthorizeReauth(runtime, session.user.email, returnTo, "No active authorization code exists.");
     }
-    await sendOtp(env, session.user.email, result.code, result.ttlSeconds, runtime.config.serverName, result.id);
+    try {
+      await sendOtp(env, session.user.email, result.code, result.ttlSeconds, runtime.config.serverName, result.id);
+    } catch (error) {
+      console.warn(error);
+      return renderAuthorizeReauthOtp(
+        runtime,
+        session.user.email,
+        result.id,
+        returnTo,
+        "Could not resend the code. Try again later.",
+        result.resendAfter
+      );
+    }
     return renderAuthorizeReauthOtp(runtime, session.user.email, result.id, returnTo, "A new code has been sent.", result.resendAfter);
   });
 
@@ -1416,10 +1574,17 @@ function createDefaultHandler<Env extends AuthWorkerEnv>(
       return new Response("Sign-in required", { status: 401 });
     }
     const form = await c.req.raw.formData();
-    assertCsrf(c.req.raw, form);
     const otpId = String(form.get("otp_id") ?? "");
     const returnTo = sanitizeAuthorizeReturnTo(String(form.get("return_to") ?? "/"));
     const resendAfter = displayResendAfter(form.get("resend_after"));
+    try {
+      assertCsrf(c.req.raw, form);
+    } catch (error) {
+      if (isCsrfError(error)) {
+        return renderAuthorizeReauthOtp(runtime, session.user.email, otpId, returnTo, "Authorization form expired. Try again.", resendAfter);
+      }
+      throw error;
+    }
     if (
       !(await runtime.repo.consumeRateLimits(
         [`oauth-reauth-verify:user:${session.user.id}`, `oauth-reauth-verify:otp:${otpId}`],
@@ -1814,10 +1979,11 @@ async function sendEmailViaResend<Env extends AuthWorkerEnv>(
   }
 }
 
-async function fetchClientMetadata(clientId: string): Promise<{ raw: unknown; redirectUris: string[] }> {
+async function fetchClientMetadata(clientId: string): Promise<ClientMetadataDocument> {
   const response = await fetch(clientId, {
-    headers: { Accept: "application/json" },
-    redirect: "manual"
+    headers: CLIENT_METADATA_FETCH_HEADERS,
+    redirect: "manual",
+    signal: AbortSignal.timeout(CLIENT_METADATA_FETCH_TIMEOUT_MS)
   });
   if (response.status >= 300 && response.status < 400) {
     throw new Error("Client metadata redirects are not accepted");
@@ -1825,14 +1991,347 @@ async function fetchClientMetadata(clientId: string): Promise<{ raw: unknown; re
   if (!response.ok) {
     throw new Error(`Client metadata fetch failed with ${response.status}`);
   }
-  const raw = (await response.json()) as Record<string, unknown>;
-  const redirectUris =
-    Array.isArray(raw.redirect_uris)
-      ? raw.redirect_uris.map(String)
-      : Array.isArray(raw.redirectUris)
-        ? raw.redirectUris.map(String)
-        : [];
-  return { raw, redirectUris };
+  const raw = await readJsonWithLimit(response, CLIENT_METADATA_MAX_BYTES);
+  return normalizeClientMetadata(clientId, raw);
+}
+
+function normalizeClientMetadata(clientId: string, raw: unknown): ClientMetadataDocument {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("Client metadata must be a JSON object");
+  }
+  const metadata = raw as Record<string, unknown>;
+  const declaredClientId = optionalString(metadata.client_id, "client_id") ?? clientId;
+  if (declaredClientId !== clientId) {
+    throw new Error("Client metadata client_id does not match the request client_id");
+  }
+  const redirectUris = requiredStringArray(metadata.redirect_uris, "redirect_uris");
+  const grantTypes = optionalStringArray(metadata.grant_types, "grant_types") ?? ["authorization_code"];
+  const responseTypes = optionalStringArray(metadata.response_types, "response_types") ?? ["code"];
+  if (!grantTypes.includes("authorization_code")) {
+    throw new Error("Client metadata must support authorization_code");
+  }
+  if (!responseTypes.includes("code")) {
+    throw new Error("Client metadata must support code response type");
+  }
+  const tokenEndpointAuthMethod = parseClientMetadataAuthMethod(metadata.token_endpoint_auth_method);
+  const jwksUri = optionalString(metadata.jwks_uri, "jwks_uri");
+  const jwks = parseInlineJwks(metadata.jwks);
+  if (tokenEndpointAuthMethod === "private_key_jwt") {
+    const signingAlg = optionalString(metadata.token_endpoint_auth_signing_alg, "token_endpoint_auth_signing_alg");
+    if (signingAlg && signingAlg !== "RS256") {
+      throw new Error("Only RS256 private_key_jwt client assertions are supported");
+    }
+    if (!jwksUri && !jwks) {
+      throw new Error("private_key_jwt clients must publish jwks_uri or jwks");
+    }
+  }
+  const document: ClientMetadataDocument = {
+    grantTypes,
+    raw: metadata,
+    redirectUris,
+    responseTypes,
+    tokenEndpointAuthMethod
+  };
+  const contacts = optionalStringArray(metadata.contacts, "contacts");
+  const logoUri = optionalString(metadata.logo_uri, "logo_uri");
+  const clientName = optionalString(metadata.client_name, "client_name");
+  const clientUri = optionalString(metadata.client_uri, "client_uri");
+  const policyUri = optionalString(metadata.policy_uri, "policy_uri");
+  const tosUri = optionalString(metadata.tos_uri, "tos_uri");
+  if (contacts) document.contacts = contacts;
+  if (jwks) document.jwks = jwks;
+  if (jwksUri) document.jwksUri = jwksUri;
+  if (logoUri) document.logoUri = logoUri;
+  if (clientName) document.clientName = clientName;
+  if (clientUri) document.clientUri = clientUri;
+  if (policyUri) document.policyUri = policyUri;
+  if (tosUri) document.tosUri = tosUri;
+  return document;
+}
+
+function clientMetadataFromPolicy(policy: ClientPolicyRow): ClientMetadataDocument {
+  return normalizeClientMetadata(policy.client_id, JSON.parse(policy.metadata_snapshot_json));
+}
+
+function synthesizeKnownClientMetadata(clientId: string, expectedRedirectUri?: string): ClientMetadataDocument | null {
+  try {
+    const url = new URL(clientId);
+    if (url.protocol !== "https:" || url.hostname !== "chatgpt.com") {
+      return null;
+    }
+    const match = url.pathname.match(/^\/oauth\/([^/]+)\/client\.json$/);
+    const connectorId = match?.[1];
+    if (!connectorId || url.search || url.hash || url.username || url.password) {
+      return null;
+    }
+    const redirectUri = `https://chatgpt.com/connector/oauth/${connectorId}`;
+    if (expectedRedirectUri && expectedRedirectUri !== redirectUri) {
+      return null;
+    }
+    return normalizeClientMetadata(clientId, {
+      client_id: clientId,
+      client_name: "ChatGPT",
+      client_uri: "https://chatgpt.com/",
+      grant_types: ["authorization_code", "refresh_token"],
+      redirect_uris: [redirectUri],
+      response_types: ["code"],
+      token_endpoint_auth_method: "none"
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function putProviderUrlClient(
+  kv: KVNamespace,
+  clientId: string,
+  metadata: ClientMetadataDocument,
+  firstSeenAt: string | null
+): Promise<void> {
+  const registrationDate =
+    firstSeenAt && Number.isFinite(Date.parse(firstSeenAt))
+      ? Math.floor(Date.parse(firstSeenAt) / 1000)
+      : Math.floor(Date.now() / 1000);
+  const providerClient: ProviderClientRecord = {
+    clientId,
+    grantTypes: metadata.grantTypes,
+    redirectUris: metadata.redirectUris,
+    registrationDate,
+    responseTypes: metadata.responseTypes,
+    tokenEndpointAuthMethod: "none"
+  };
+  if (metadata.clientName) providerClient.clientName = metadata.clientName;
+  if (metadata.clientUri) providerClient.clientUri = metadata.clientUri;
+  if (metadata.contacts) providerClient.contacts = metadata.contacts;
+  if (metadata.jwksUri) providerClient.jwksUri = metadata.jwksUri;
+  if (metadata.logoUri) providerClient.logoUri = metadata.logoUri;
+  if (metadata.policyUri) providerClient.policyUri = metadata.policyUri;
+  if (metadata.tosUri) providerClient.tosUri = metadata.tosUri;
+  await kv.put(`client:${clientId}`, JSON.stringify(providerClient));
+}
+
+async function validatePrivateKeyJwtClientAssertion(
+  params: URLSearchParams,
+  clientId: string,
+  metadata: ClientMetadataDocument,
+  tokenEndpointUrl: string,
+  flowKv: KVNamespace
+): Promise<string | null> {
+  if (params.get("client_assertion_type") !== CLIENT_ASSERTION_TYPE) {
+    return "client_assertion_required";
+  }
+  const assertion = params.get("client_assertion");
+  if (!assertion) {
+    return "client_assertion_required";
+  }
+  try {
+    const parts = assertion.split(".");
+    if (parts.length !== 3) {
+      return "invalid_client_assertion";
+    }
+    const jwtParts = parts as [string, string, string];
+    const header = decodeJwtJson<Record<string, unknown>>(jwtParts[0]);
+    const payload = decodeJwtJson<Record<string, unknown>>(jwtParts[1]);
+    if (header.alg !== "RS256") {
+      return "invalid_client_assertion";
+    }
+    if (optionalString(payload.iss, "iss") !== clientId || optionalString(payload.sub, "sub") !== clientId) {
+      return "invalid_client_assertion";
+    }
+    if (!jwtAudienceMatches(payload.aud, tokenEndpointAudience(tokenEndpointUrl))) {
+      return "invalid_client_assertion";
+    }
+    const now = Math.floor(Date.now() / 1000);
+    const exp = optionalNumber(payload.exp, "exp");
+    const nbf = optionalNumber(payload.nbf, "nbf");
+    const iat = optionalNumber(payload.iat, "iat");
+    if (!exp || exp <= now - 60 || exp > now + 600) {
+      return "invalid_client_assertion";
+    }
+    if (nbf && nbf > now + 60) {
+      return "invalid_client_assertion";
+    }
+    if (iat && iat > now + 60) {
+      return "invalid_client_assertion";
+    }
+    const jti = optionalString(payload.jti, "jti");
+    if (jti) {
+      const replayKey = `client-assertion:${await sha256Hex(clientId)}:${await sha256Hex(jti)}`;
+      if (await flowKv.get(replayKey)) {
+        return "invalid_client_assertion";
+      }
+      await flowKv.put(replayKey, "1", { expirationTtl: Math.max(60, exp - now + 60) });
+    }
+    const jwks = await loadClientJwks(metadata);
+    const verified = await verifyRs256Jwt(jwtParts, header, jwks);
+    return verified ? null : "invalid_client_assertion";
+  } catch (error) {
+    console.warn(error);
+    return "invalid_client_assertion";
+  }
+}
+
+async function loadClientJwks(metadata: ClientMetadataDocument): Promise<ClientJsonWebKeySet> {
+  if (metadata.jwks) {
+    return metadata.jwks;
+  }
+  if (!metadata.jwksUri) {
+    throw new Error("Missing client jwks_uri");
+  }
+  if (!isPublicHttpsUrl(metadata.jwksUri)) {
+    throw new Error("Client jwks_uri must be a public HTTPS URL");
+  }
+  const response = await fetch(metadata.jwksUri, {
+    headers: CLIENT_METADATA_FETCH_HEADERS,
+    redirect: "manual"
+  });
+  if (response.status >= 300 && response.status < 400) {
+    throw new Error("Client jwks_uri redirects are not accepted");
+  }
+  if (!response.ok) {
+    throw new Error(`Client jwks_uri fetch failed with ${response.status}`);
+  }
+  return parseInlineJwks(await readJsonWithLimit(response, CLIENT_METADATA_MAX_BYTES)) ?? { keys: [] };
+}
+
+async function verifyRs256Jwt(parts: [string, string, string], header: Record<string, unknown>, jwks: ClientJsonWebKeySet): Promise<boolean> {
+  const kid = optionalString(header.kid, "kid");
+  const signingInput = new TextEncoder().encode(`${parts[0]}.${parts[1]}`);
+  const signature = base64UrlToBytes(parts[2]);
+  const keys = jwks.keys.filter((key) => {
+    if (key.kty !== "RSA") {
+      return false;
+    }
+    if (kid && key.kid !== kid) {
+      return false;
+    }
+    if (key.use && key.use !== "sig") {
+      return false;
+    }
+    if (key.alg && key.alg !== "RS256") {
+      return false;
+    }
+    return true;
+  });
+  for (const key of keys) {
+    try {
+      const cryptoKey = await crypto.subtle.importKey(
+        "jwk",
+        key,
+        { hash: "SHA-256", name: "RSASSA-PKCS1-v1_5" },
+        false,
+        ["verify"]
+      );
+      if (await crypto.subtle.verify("RSASSA-PKCS1-v1_5", cryptoKey, signature, signingInput)) {
+        return true;
+      }
+    } catch (error) {
+      console.warn(error);
+    }
+  }
+  return false;
+}
+
+function tokenEndpointAudience(value: string): string {
+  const url = new URL(value);
+  url.hash = "";
+  url.search = "";
+  return url.toString();
+}
+
+function jwtAudienceMatches(value: unknown, expected: string): boolean {
+  if (typeof value === "string") {
+    return value === expected;
+  }
+  return Array.isArray(value) && value.some((entry) => entry === expected);
+}
+
+function parseClientMetadataAuthMethod(value: unknown): ClientMetadataAuthMethod {
+  const method = optionalString(value, "token_endpoint_auth_method") ?? "none";
+  if (!CLIENT_METADATA_AUTH_METHODS.includes(method as ClientMetadataAuthMethod)) {
+    throw new Error("Unsupported client token endpoint authentication method");
+  }
+  return method as ClientMetadataAuthMethod;
+}
+
+function parseInlineJwks(value: unknown): ClientJsonWebKeySet | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("jwks must be a JSON object");
+  }
+  const keys = (value as { keys?: unknown }).keys;
+  if (!Array.isArray(keys)) {
+    throw new Error("jwks.keys must be an array");
+  }
+  return {
+    keys: keys.filter((key): key is ClientJsonWebKey => Boolean(key) && typeof key === "object" && !Array.isArray(key)) as ClientJsonWebKey[]
+  };
+}
+
+async function readJsonWithLimit(response: Response, maxBytes: number): Promise<unknown> {
+  const contentLength = response.headers.get("content-length");
+  if (contentLength && Number.parseInt(contentLength, 10) > maxBytes) {
+    throw new Error("JSON response exceeds size limit");
+  }
+  const text = await response.text();
+  if (new TextEncoder().encode(text).byteLength > maxBytes) {
+    throw new Error("JSON response exceeds size limit");
+  }
+  return JSON.parse(text);
+}
+
+function requiredStringArray(value: unknown, fieldName: string): string[] {
+  const values = optionalStringArray(value, fieldName);
+  if (!values || values.length === 0) {
+    throw new Error(`${fieldName} is required`);
+  }
+  return values;
+}
+
+function optionalStringArray(value: unknown, fieldName: string): string[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+    throw new Error(`${fieldName} must be a string array`);
+  }
+  return [...value];
+}
+
+function optionalString(value: unknown, fieldName: string): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new Error(`${fieldName} must be a string`);
+  }
+  return value;
+}
+
+function optionalNumber(value: unknown, fieldName: string): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${fieldName} must be a number`);
+  }
+  return value;
+}
+
+function decodeJwtJson<T>(part: string): T {
+  return JSON.parse(new TextDecoder().decode(base64UrlToBytes(part))) as T;
+}
+
+function base64UrlToBytes(value: string): Uint8Array<ArrayBuffer> {
+  const base64 = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const binary = atob(base64);
+  const bytes = new Uint8Array(new ArrayBuffer(binary.length));
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
 }
 
 async function annotateProviderGrants<Env extends AuthWorkerEnv>(
@@ -2856,8 +3355,12 @@ function assertCsrf(request: Request, form: FormData): void {
   const cookieValue = readCookie(request, CSRF_COOKIE);
   const formValue = String(form.get("csrf_token") ?? "");
   if (!cookieValue || !formValue || cookieValue !== formValue) {
-    throw new Error("Invalid CSRF token");
+    throw new CsrfError();
   }
+}
+
+function isCsrfError(error: unknown): error is CsrfError {
+  return error instanceof CsrfError;
 }
 
 function sessionCookie(value: string, ttlSeconds: number): string {
@@ -3362,6 +3865,37 @@ function requiredEnv(value: string | undefined, name: string): string {
     throw new Error(`${name} is required`);
   }
   return value;
+}
+
+function renderOAuthServerMetadata(url: URL): Response {
+  const origin = url.origin;
+  return json({
+    issuer: origin,
+    authorization_endpoint: `${origin}/authorize`,
+    token_endpoint: `${origin}/token`,
+    scopes_supported: [...OAUTH_SCOPES],
+    response_types_supported: ["code"],
+    response_modes_supported: ["query"],
+    grant_types_supported: ["authorization_code", "refresh_token"],
+    token_endpoint_auth_methods_supported: ["none", "private_key_jwt"],
+    token_endpoint_auth_signing_alg_values_supported: ["RS256"],
+    revocation_endpoint: `${origin}/token`,
+    code_challenge_methods_supported: ["S256"],
+    client_id_metadata_document_supported: true
+  });
+}
+
+function addCorsHeaders(response: Response, request: Request): Response {
+  const origin = request.headers.get("Origin");
+  if (!origin) {
+    return response;
+  }
+  const headers = new Headers(response.headers);
+  headers.set("Access-Control-Allow-Origin", origin);
+  headers.set("Access-Control-Allow-Methods", "*");
+  headers.set("Access-Control-Allow-Headers", "Authorization, *");
+  headers.set("Access-Control-Max-Age", "86400");
+  return new Response(response.body, { headers, status: response.status, statusText: response.statusText });
 }
 
 function escapeHtml(value: string): string {

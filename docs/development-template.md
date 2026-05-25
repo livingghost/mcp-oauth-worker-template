@@ -28,8 +28,9 @@ apps/mcp-worker
 1. Add a capability entry to `CAPABILITIES` in `packages/mcp-tools/src/index.ts`.
 2. Register the tool in `createMcpServer`.
 3. Call `assertCapability(options, capability)` inside the tool handler.
-4. Return MCP SDK content from the handler.
-5. Add or update tests that prove the capability is listed only when the authenticated context satisfies the required scopes and permissions.
+4. Give the tool a concrete title, description, `inputSchema`, `outputSchema`, safety annotations, invocation text, and OAuth `securitySchemes`.
+5. Return MCP SDK content with `structuredContent` from the handler.
+6. Add or update tests that prove the capability is listed only when the authenticated context satisfies the required scopes and permissions.
 
 ## Adding A Scope
 
@@ -52,6 +53,9 @@ When a project needs per-issued-URL downstream API configuration, implement it i
 ## Auth Boundary
 
 - `/mcp` must stay protected by the OAuth provider and then rechecked against Turso state.
+- URL-based OAuth client metadata is normalized before registration. Public clients use `none`; clients that publish `private_key_jwt` must verify RS256 assertions against `jwks` or `jwks_uri`.
+- ChatGPT connector metadata URLs are handled as URL-based OAuth clients with a matching `https://chatgpt.com/connector/oauth/{id}` redirect URI.
+- The MCP API handler retries OAuth token unwrap briefly after authorization so connector setup is not dependent on immediate provider-state visibility.
 - Access tokens stay short-lived.
 - Provider refresh grants are non-expiring by default.
 - Local MCP authorization expiration and revoke are controlled by admin policy, per-user policy, consent state, user status, OAuth client app presence, and `authz_version`.

@@ -99,7 +99,8 @@ Initial admin bootstrap is only the first admin seed. Additional admins are crea
 - PKCE S256 is required.
 - Implicit flow, plain PKCE, and token exchange grant are disabled.
 - OAuth metadata advertises the deployed authorization, token, and protected resource endpoints.
-- URL-based OAuth client metadata is fetched only from public HTTPS URLs and accepted only after redirect URI validation.
+- URL-based OAuth client metadata is fetched only from public HTTPS URLs and accepted only after redirect URI validation. ChatGPT connector metadata URLs are normalized to their matching redirect URI.
+- Token endpoint client authentication supports public clients and `private_key_jwt` clients with RS256 `jwks` / `jwks_uri` verification.
 - Non-URL client IDs must already exist in the local OAuth client app table.
 - Existing grants are not revoked by new authorization; revocation is explicit through local policy/version checks.
 - Individual provider grant revoke requires provider grant metadata to match an active local consent. If metadata is missing or stale, use the bulk user authorization revoke path.

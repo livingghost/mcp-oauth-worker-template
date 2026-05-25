@@ -17,7 +17,7 @@ packages/auth-db
   Turso repository, clean initial migration, atomic transactions, maintenance scripts.
 
 packages/mcp-tools
-  MCP server factory, capability registry, tools, resources, and prompts.
+  MCP server factory, capability registry, tools, resources, prompts, tool descriptors, and output schemas.
 
 packages/shared
   OAuth scopes, token props, AuthContext, permissions, shared utilities.
@@ -29,10 +29,12 @@ packages/shared
 
 - Public OAuth clients only.
 - PKCE S256 is required.
-- OAuth implicit flow, plain PKCE, token exchange, and confidential client auth are rejected.
-- URL-based OAuth client metadata is fetched only from public HTTPS URLs and accepted only after redirect URI validation.
+- OAuth implicit flow, plain PKCE, token exchange, and shared-secret confidential client auth are rejected.
+- URL-based OAuth client metadata is fetched only from public HTTPS URLs and accepted only after redirect URI validation. ChatGPT connector metadata URLs are normalized to their matching redirect URI.
+- OAuth token endpoint client authentication supports public clients and `private_key_jwt` clients with RS256 JWKS verification.
 - `/authorize`, `/token`, and `/mcp` fail closed before and after provider handling.
 - `/mcp` rechecks bearer token props against current Turso user, client, consent, scope, permission, and version state.
+- `/mcp` retries token unwrap briefly after OAuth issue to tolerate provider-state visibility delay during connector setup.
 - Email OTP is required for login, initial admin setup, admin step-up, recovery, and OAuth authorization confirmation.
 - Login OTPs are issued only for existing active users, except initial admin setup and recovery flows.
 - Web sessions have idle and absolute expiry. Session touch is allowed only through route policy after required checks.
